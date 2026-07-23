@@ -192,7 +192,16 @@ function historyItem(label, value, detail = "") {
 
 function validIsoDate(value) {
   const date = isoDate(value);
-  return /^\d{4}-\d{2}-\d{2}$/.test(date) && !Number.isNaN(Date.parse(`${date}T00:00:00.000Z`)) ? date : "";
+  const match = date.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return "";
+
+  const [year, month, day] = match.slice(1).map(Number);
+  const calendarDate = new Date(Date.UTC(year, month - 1, day));
+  return calendarDate.getUTCFullYear() === year
+    && calendarDate.getUTCMonth() === month - 1
+    && calendarDate.getUTCDate() === day
+    ? date
+    : "";
 }
 
 function optionalNonNegativeNumber(value) {

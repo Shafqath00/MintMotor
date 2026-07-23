@@ -178,6 +178,16 @@ test("mapVehicleHistory omits absent MOT facts and recognizes unavailable states
   assert.equal(unavailable.mot.status, "unavailable");
 });
 
+test("mapVehicleHistory rejects impossible MOT calendar dates", () => {
+  const invalidDate = mapVehicleHistory({DataItems: {MotHistory: {MotDueDate: "2026-02-30"}}}, "AB12CDE", "2026-02-01T10:00:00.000Z");
+  const explicitStatus = mapVehicleHistory({DataItems: {MotHistory: {MotDueDate: "2026-02-30", Status: "Valid"}}}, "AB12CDE", "2026-02-01T10:00:00.000Z");
+
+  assert.equal(invalidDate.mot.status, "unavailable");
+  assert.equal("expiryDate" in invalidDate.mot, false);
+  assert.equal(explicitStatus.mot.status, "valid");
+  assert.equal("expiryDate" in explicitStatus.mot, false);
+});
+
 test("lookup results do not expose raw UKVD provider payloads", async () => {
   const originalEnv = {...process.env};
   delete process.env.UKVD_API_KEY;
