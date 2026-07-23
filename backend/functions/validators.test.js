@@ -1,4 +1,4 @@
-﻿const assert = require("node:assert/strict");
+const assert = require("node:assert/strict");
 const test = require("node:test");
 const {
   validateAdminCarPayload,
@@ -12,6 +12,7 @@ const {
   hasActiveSubscription,
   sanitizeVehicleHistory,
   selectVehicleHistoryForPublish,
+  prepareVehicleHistoryUpdate,
 } = require("./validators");
 
 test("validateListingPayload accepts a complete private seller listing", () => {
@@ -280,7 +281,7 @@ test("sanitizeVehicleHistory discards history from non-UKVD providers", () => {
   assert.equal(sanitizeVehicleHistory({provider: "manual-fallback"}), undefined);
 });
 
-test("selectVehicleHistoryForPublish retains a trusted UKVD snapshot when refresh falls back", () => {
+test("selectVehicleHistoryForPublish retains an attested matching UKVD snapshot when refresh falls back", () => {
   const existing = {
     provider: "ukvehicledata",
     summaryStatus: "attention",
@@ -289,12 +290,14 @@ test("selectVehicleHistoryForPublish retains a trusted UKVD snapshot when refres
   };
   const result = selectVehicleHistoryForPublish({
     lookup: {lookupProvider: "manual-fallback"},
-    currentHistory: existing,
+    currentHistory: {...existing, registrationNumber: "AB12CDE"},
+    currentHistoryVerified: true,
     registrationNumber: "AB12CDE",
   });
 
-  assert.equal(result.provider, "ukvehicledata");
-  assert.equal(result.stolen.status, "recorded");
+  assert.equal(result.vehicleHistoryVerified, true);
+  assert.equal(result.vehicleHistory.provider, "ukvehicledata");
+  assert.equal(result.vehicleHistory.stolen.status, "recorded");
 });
 
 test("selectVehicleHistoryForPublish stores an unavailable UKVD snapshot after an untrusted fallback", () => {
@@ -304,8 +307,101 @@ test("selectVehicleHistoryForPublish stores an unavailable UKVD snapshot after a
     registrationNumber: "AB12CDE",
   });
 
-  assert.equal(result.provider, "ukvehicledata");
-  assert.equal(result.summaryStatus, "unavailable");
-  assert.equal(result.stolen.status, "unavailable");
-  assert.equal(result.mot.status, "unavailable");
+  assert.equal(result.vehicleHistoryVerified, false);
+  assert.equal(result.vehicleHistory.provider, "ukvehicledata");
+  assert.equal(result.vehicleHistory.summaryStatus, "unavailable");
+  assert.equal(result.vehicleHistory.stolen.status, "unavailable");
+  assert.equal(result.vehicleHistory.mot.status, "unavailable");
+});
+
+test("validateListingPayload never accepts client vehicle history attestation", () => {
+  const {listing} = validateListingPayload({vehicleHistoryVerified: true}, {partial: true});
+  assert.equal(listing.vehicleHistoryVerified, undefined);
+});
+
+test("selectVehicleHistoryForPublish rejects forged unverified client history on fallback", () => {
+  const result = selectVehicleHistoryForPublish({
+    lookup: {lookupProvider: "manual-fallback"},
+    currentHistory: {
+      provider: "ukvehicledata",
+      registrationNumber: "AB12CDE",
+      summaryStatus: "clear",
+      stolen: {status: "clear", label: "Stolen vehicle"},
+    },
+    currentHistoryVerified: false,
+    registrationNumber: "AB12CDE",
+  });
+
+  assert.equal(result.vehicleHistoryVerified, false);
+  assert.equal(result.vehicleHistory.summaryStatus, "unavailable");
+});
+
+test("selectVehicleHistoryForPublish rejects an attested history for another registration on fallback", () => {
+  const result = selectVehicleHistoryForPublish({
+    lookup: {lookupProvider: "seeded-fallback"},
+    currentHistory: {
+      provider: "ukvehicledata",
+      registrationNumber: "AB12CDE",
+      summaryStatus: "clear",
+      stolen: {status: "clear", label: "Stolen vehicle"},
+    },
+    currentHistoryVerified: true,
+    registrationNumber: "CD34EFG",
+  });
+
+  assert.equal(result.vehicleHistoryVerified, false);
+  assert.equal(result.vehicleHistory.registrationNumber, "CD34EFG");
+  assert.equal(result.vehicleHistory.summaryStatus, "unavailable");
+});
+
+test("selectVehicleHistoryForPublish attests only a matching UKVD refresh", () => {
+  const result = selectVehicleHistoryForPublish({
+    lookup: {
+      lookupProvider: "ukvehicledata",
+      vehicleHistory: {
+        provider: "ukvehicledata",
+        registrationNumber: "AB12CDE",
+        summaryStatus: "clear",
+        stolen: {status: "clear", label: "Stolen vehicle"},
+      },
+    },
+    registrationNumber: "AB12CDE",
+  });
+
+  assert.equal(result.vehicleHistoryVerified, true);
+  assert.equal(result.vehicleHistory.summaryStatus, "clear");
+});
+
+test("prepareVehicleHistoryUpdate preserves an attested snapshot on same-registration client overwrite attempts", () => {
+  const result = prepareVehicleHistoryUpdate({
+    current: {registrationNumber: "AB12CDE", vehicleHistoryVerified: true},
+    payload: {registrationNumber: "ab12 cde", vehicleHistory: {provider: "ukvehicledata"}},
+    listing: {registrationNumber: "AB12CDE", vehicleHistory: {provider: "ukvehicledata"}},
+  });
+
+  assert.equal(result.listing.vehicleHistory, undefined);
+  assert.equal(result.listing.vehicleHistoryVerified, true);
+  assert.equal(result.clearVehicleHistory, false);
+});
+
+test("prepareVehicleHistoryUpdate preserves attestation on unrelated same-registration edits", () => {
+  const result = prepareVehicleHistoryUpdate({
+    current: {registrationNumber: "AB12CDE", vehicleHistoryVerified: true},
+    payload: {price: 12000},
+    listing: {price: 12000},
+  });
+
+  assert.equal(result.listing.vehicleHistoryVerified, true);
+  assert.equal(result.clearVehicleHistory, false);
+});
+
+test("prepareVehicleHistoryUpdate invalidates and clears history when registration changes", () => {
+  const result = prepareVehicleHistoryUpdate({
+    current: {registrationNumber: "AB12CDE", vehicleHistoryVerified: true},
+    payload: {registrationNumber: "CD34EFG"},
+    listing: {registrationNumber: "CD34EFG"},
+  });
+
+  assert.equal(result.listing.vehicleHistoryVerified, false);
+  assert.equal(result.clearVehicleHistory, true);
 });

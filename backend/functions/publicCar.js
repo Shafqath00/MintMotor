@@ -1,7 +1,7 @@
 const { sanitizeVehicleHistory } = require("./validators");
 
 function publicCar(car = {}) {
-  const {lookupRaw, sellerPostcode, sellerGeo, vehicleHistory, ...publicListing} = car;
+  const {lookupRaw, sellerPostcode, sellerGeo, vehicleHistory, vehicleHistoryVerified, ...publicListing} = car;
   const sanitizedHistory = sanitizeVehicleHistory(vehicleHistory);
   return {
     ...publicListing,

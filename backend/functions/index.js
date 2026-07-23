@@ -19,6 +19,7 @@ const {
   validateSellerPublishRequirements,
   hasActiveSubscription,
   selectVehicleHistoryForPublish,
+  prepareVehicleHistoryUpdate,
 } = require("./validators");
 const { VehicleLookupError, lookupVehicle } = require("./vehicleLookup");
 const { publicCar, safeVehicleLookup } = require("./publicCar");
@@ -582,6 +583,7 @@ app.post("/cars", requireAuth, async (req, res) => {
     const now = FieldValue.serverTimestamp();
     const docRef = await database.collection("cars").add({
       ...listing,
+      vehicleHistoryVerified: false,
       ...locationPatch,
       ownerId: req.user.uid,
       ownerEmail: req.user.email || "",
@@ -621,6 +623,11 @@ app.patch("/cars/:id", requireAuth, async (req, res) => {
       return;
     }
 
+    const historyUpdate = prepareVehicleHistoryUpdate({
+      current,
+      payload: req.body,
+      listing,
+    });
     let locationPatch = {};
     try {
       locationPatch = await buildSellerLocationPatch(listing.sellerPostcode);
@@ -630,7 +637,8 @@ app.patch("/cars/:id", requireAuth, async (req, res) => {
     }
 
     await docRef.set({
-      ...listing,
+      ...historyUpdate.listing,
+      ...(historyUpdate.clearVehicleHistory ? {vehicleHistory: FieldValue.delete()} : {}),
       ...locationPatch,
       updatedAt: FieldValue.serverTimestamp(),
     }, { merge: true });
@@ -714,15 +722,17 @@ app.post("/cars/:id/publish", requireAuth, async (req, res) => {
     } catch (lookupError) {
       logger.warn("Unable to refresh vehicle history before publishing", lookupError);
     }
-    const verifiedHistory = selectVehicleHistoryForPublish({
+    const historySelection = selectVehicleHistoryForPublish({
       lookup: verifiedLookup,
       currentHistory: car.vehicleHistory,
+      currentHistoryVerified: car.vehicleHistoryVerified === true,
       registrationNumber: car.registrationNumber,
     });
 
     await docRef.set({
       ...locationPatch,
-      vehicleHistory: verifiedHistory,
+      vehicleHistory: historySelection.vehicleHistory,
+      vehicleHistoryVerified: historySelection.vehicleHistoryVerified,
       status: LISTING_STATUS.PUBLISHED,
       publishedAt: FieldValue.serverTimestamp(),
       updatedAt: FieldValue.serverTimestamp(),

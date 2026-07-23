@@ -124,9 +124,51 @@ function unavailableVehicleHistory(registrationNumber) {
   return history;
 }
 
-function selectVehicleHistoryForPublish({lookup = {}, currentHistory, registrationNumber} = {}) {
-  if (lookup.lookupProvider === "ukvehicledata") return sanitizeVehicleHistory(lookup.vehicleHistory) || unavailableVehicleHistory(registrationNumber);
-  return sanitizeVehicleHistory(currentHistory) || unavailableVehicleHistory(registrationNumber);
+function historyMatchesRegistration(history, registrationNumber) {
+  return normalizeRegistrationNumber(history?.registrationNumber) === normalizeRegistrationNumber(registrationNumber);
+}
+
+function selectVehicleHistoryForPublish({lookup = {}, currentHistory, currentHistoryVerified = false, registrationNumber} = {}) {
+  const refreshedHistory = sanitizeVehicleHistory(lookup.vehicleHistory);
+  if (lookup.lookupProvider === "ukvehicledata" && refreshedHistory && historyMatchesRegistration(refreshedHistory, registrationNumber)) {
+    return {vehicleHistory: refreshedHistory, vehicleHistoryVerified: true};
+  }
+
+  const trustedCurrentHistory = sanitizeVehicleHistory(currentHistory);
+  if (currentHistoryVerified === true && trustedCurrentHistory && historyMatchesRegistration(trustedCurrentHistory, registrationNumber)) {
+    return {vehicleHistory: trustedCurrentHistory, vehicleHistoryVerified: true};
+  }
+
+  return {vehicleHistory: unavailableVehicleHistory(registrationNumber), vehicleHistoryVerified: false};
+}
+
+function prepareVehicleHistoryUpdate({current = {}, payload = {}, listing = {}} = {}) {
+  const nextListing = {...listing};
+  delete nextListing.vehicleHistoryVerified;
+
+  const currentRegistration = normalizeRegistrationNumber(current.registrationNumber);
+  const registrationProvided = payload.registrationNumber !== undefined;
+  const nextRegistration = registrationProvided
+    ? normalizeRegistrationNumber(payload.registrationNumber)
+    : currentRegistration;
+  const registrationChanged = registrationProvided && nextRegistration !== currentRegistration;
+
+  if (registrationChanged) {
+    nextListing.vehicleHistoryVerified = false;
+    return {
+      listing: nextListing,
+      clearVehicleHistory: payload.vehicleHistory === undefined,
+    };
+  }
+
+  if (current.vehicleHistoryVerified === true) {
+    delete nextListing.vehicleHistory;
+    nextListing.vehicleHistoryVerified = true;
+    return {listing: nextListing, clearVehicleHistory: false};
+  }
+
+  nextListing.vehicleHistoryVerified = false;
+  return {listing: nextListing, clearVehicleHistory: false};
 }
 
 function validateListingPayload(payload = {}, options = {}) {
@@ -387,5 +429,6 @@ module.exports = {
   validateSellerPublishRequirements,
   sanitizeVehicleHistory,
   selectVehicleHistoryForPublish,
+  prepareVehicleHistoryUpdate,
 };
 

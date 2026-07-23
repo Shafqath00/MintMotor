@@ -56,3 +56,7 @@ test("publicCar sanitizes legacy stored vehicle history", () => {
   assert.equal(result.vehicleHistory.stolen.raw, undefined);
   assert.equal(result.vehicleHistory.stolen.status, "clear");
 });
+test("publicCar strips server-only vehicle history attestation", () => {
+  const result = publicCar({vehicleHistoryVerified: true});
+  assert.equal(result.vehicleHistoryVerified, undefined);
+});
