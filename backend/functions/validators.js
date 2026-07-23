@@ -63,19 +63,49 @@ function asOptionalPositiveNumber(value) {
 const HISTORY_ITEM_STATUS = new Set(["clear", "recorded", "unavailable"]);
 const HISTORY_SUMMARY_STATUS = new Set(["clear", "attention", "unavailable"]);
 const MOT_STATUS = new Set(["valid", "expired", "not-found", "unavailable"]);
-const HISTORY_ITEM_KEYS = ["outstandingFinance", "stolen", "writtenOff", "scrapped", "imported", "exported", "mileageAnomaly", "colourChanges", "plateChanges"];
-const HISTORY_ITEM_LABELS = {outstandingFinance: "Outstanding finance", stolen: "Stolen vehicle", writtenOff: "Insurance write-off", scrapped: "Scrapped", imported: "Imported", exported: "Exported", mileageAnomaly: "Mileage anomaly", colourChanges: "Colour changes", plateChanges: "Registration plate changes"};
+const HISTORY_ITEM_KEYS = [
+  "outstandingFinance",
+  "stolen",
+  "writtenOff",
+  "scrapped",
+  "imported",
+  "exported",
+  "mileageAnomaly",
+  "colourChanges",
+  "plateChanges",
+];
+const HISTORY_ITEM_LABELS = {
+  outstandingFinance: "Outstanding finance",
+  stolen: "Stolen vehicle",
+  writtenOff: "Insurance write-off",
+  scrapped: "Scrapped",
+  imported: "Imported",
+  exported: "Exported",
+  mileageAnomaly: "Mileage anomaly",
+  colourChanges: "Colour changes",
+  plateChanges: "Registration plate changes",
+};
 
 function normalizeRegistrationNumber(value) {
-  return asString(value).toUpperCase().replace(/[^A-Z0-9]/g, "");
+  return asString(value)
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, "");
 }
 
 function sanitizeHistoryItem(value = {}) {
-  return {status: HISTORY_ITEM_STATUS.has(value?.status) ? value.status : "unavailable", label: asString(value?.label).slice(0, 80), detail: asString(value?.detail).slice(0, 300)};
+  return {
+    status: HISTORY_ITEM_STATUS.has(value?.status)
+      ? value.status
+      : "unavailable",
+    label: asString(value?.label).slice(0, 80),
+    detail: asString(value?.detail).slice(0, 300),
+  };
 }
 
 function sanitizeMot(value = {}) {
-  const mot = {status: MOT_STATUS.has(value?.status) ? value.status : "unavailable"};
+  const mot = {
+    status: MOT_STATUS.has(value?.status) ? value.status : "unavailable",
+  };
   const expiryDate = asString(value?.expiryDate).slice(0, 10);
   const latestTestDate = asString(value?.latestTestDate).slice(0, 10);
   const latestResult = asString(value?.latestResult).toLowerCase();
@@ -84,7 +114,8 @@ function sanitizeMot(value = {}) {
   const failureCount = asOptionalPositiveNumber(value?.failureCount);
   if (expiryDate) mot.expiryDate = expiryDate;
   if (latestTestDate) mot.latestTestDate = latestTestDate;
-  if (["passed", "failed"].includes(latestResult)) mot.latestResult = latestResult;
+  if (["passed", "failed"].includes(latestResult))
+    mot.latestResult = latestResult;
   if (latestMileage !== undefined) mot.latestMileage = latestMileage;
   if (advisoryCount !== undefined) mot.advisoryCount = advisoryCount;
   if (failureCount !== undefined) mot.failureCount = failureCount;
@@ -93,69 +124,146 @@ function sanitizeMot(value = {}) {
 
 function validateVehicleHistory(value, errors) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    errors.push("Vehicle history must be an object supplied by UK Vehicle Data.");
+    errors.push(
+      "Vehicle history must be an object supplied by UK Vehicle Data.",
+    );
     return false;
   }
   if (value.provider !== "ukvehicledata") {
     errors.push("Vehicle history must be supplied by UK Vehicle Data.");
     return false;
   }
-  if (value.summaryStatus !== undefined && !HISTORY_SUMMARY_STATUS.has(value.summaryStatus)) errors.push("Vehicle history summary status is not supported.");
+  if (
+    value.summaryStatus !== undefined &&
+    !HISTORY_SUMMARY_STATUS.has(value.summaryStatus)
+  )
+    errors.push("Vehicle history summary status is not supported.");
   for (const key of HISTORY_ITEM_KEYS) {
     const item = value[key];
     if (item === undefined) continue;
-    if (!item || typeof item !== "object" || Array.isArray(item) || !HISTORY_ITEM_STATUS.has(item.status)) errors.push(`Vehicle history ${key} status is not supported.`);
+    if (
+      !item ||
+      typeof item !== "object" ||
+      Array.isArray(item) ||
+      !HISTORY_ITEM_STATUS.has(item.status)
+    )
+      errors.push(`Vehicle history ${key} status is not supported.`);
   }
-  if (value.mot !== undefined && (!value.mot || typeof value.mot !== "object" || Array.isArray(value.mot) || !MOT_STATUS.has(value.mot.status))) errors.push("Vehicle history MOT status is not supported.");
+  if (
+    value.mot !== undefined &&
+    (!value.mot ||
+      typeof value.mot !== "object" ||
+      Array.isArray(value.mot) ||
+      !MOT_STATUS.has(value.mot.status))
+  )
+    errors.push("Vehicle history MOT status is not supported.");
   return errors.length === 0;
 }
 
 function sanitizeVehicleHistory(value = {}) {
-  if (!value || typeof value !== "object" || Array.isArray(value) || value.provider !== "ukvehicledata") return undefined;
-  const history = {provider: "ukvehicledata", checkedAt: asString(value.checkedAt).slice(0, 40), registrationNumber: normalizeRegistrationNumber(value.registrationNumber), summaryStatus: HISTORY_SUMMARY_STATUS.has(value.summaryStatus) ? value.summaryStatus : "unavailable"};
-  for (const key of HISTORY_ITEM_KEYS) if (value[key] !== undefined) history[key] = sanitizeHistoryItem(value[key]);
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    value.provider !== "ukvehicledata"
+  )
+    return undefined;
+  const history = {
+    provider: "ukvehicledata",
+    checkedAt: asString(value.checkedAt).slice(0, 40),
+    registrationNumber: normalizeRegistrationNumber(value.registrationNumber),
+    summaryStatus: HISTORY_SUMMARY_STATUS.has(value.summaryStatus)
+      ? value.summaryStatus
+      : "unavailable",
+  };
+  for (const key of HISTORY_ITEM_KEYS)
+    if (value[key] !== undefined)
+      history[key] = sanitizeHistoryItem(value[key]);
   if (value.mot !== undefined) history.mot = sanitizeMot(value.mot);
   return history;
 }
 
 function unavailableVehicleHistory(registrationNumber) {
-  const history = {provider: "ukvehicledata", checkedAt: new Date().toISOString(), registrationNumber: normalizeRegistrationNumber(registrationNumber), summaryStatus: "unavailable", mot: {status: "unavailable"}};
-  for (const key of HISTORY_ITEM_KEYS) history[key] = {status: "unavailable", label: HISTORY_ITEM_LABELS[key], detail: "Unable to refresh this check."};
+  const history = {
+    provider: "ukvehicledata",
+    checkedAt: new Date().toISOString(),
+    registrationNumber: normalizeRegistrationNumber(registrationNumber),
+    summaryStatus: "unavailable",
+    mot: { status: "unavailable" },
+  };
+  for (const key of HISTORY_ITEM_KEYS)
+    history[key] = {
+      status: "unavailable",
+      label: HISTORY_ITEM_LABELS[key],
+      detail: "Unable to refresh this check.",
+    };
   return history;
 }
 
 function historyMatchesRegistration(history, registrationNumber) {
-  return normalizeRegistrationNumber(history?.registrationNumber) === normalizeRegistrationNumber(registrationNumber);
+  return (
+    normalizeRegistrationNumber(history?.registrationNumber) ===
+    normalizeRegistrationNumber(registrationNumber)
+  );
 }
 
-function selectVehicleHistoryForPublish({lookup = {}, currentHistory, currentHistoryVerified = false, registrationNumber} = {}) {
+function selectVehicleHistoryForPublish({
+  lookup = {},
+  currentHistory,
+  currentHistoryVerified = false,
+  registrationNumber,
+} = {}) {
   if (lookup.lookupProvider === "not-found") {
-    return {vehicleHistory: unavailableVehicleHistory(registrationNumber), vehicleHistoryVerified: false};
+    return {
+      vehicleHistory: unavailableVehicleHistory(registrationNumber),
+      vehicleHistoryVerified: false,
+    };
   }
 
   const refreshedHistory = sanitizeVehicleHistory(lookup.vehicleHistory);
-  if (lookup.lookupProvider === "ukvehicledata" && refreshedHistory && historyMatchesRegistration(refreshedHistory, registrationNumber)) {
-    return {vehicleHistory: refreshedHistory, vehicleHistoryVerified: true};
+  if (
+    lookup.lookupProvider === "ukvehicledata" &&
+    refreshedHistory &&
+    historyMatchesRegistration(refreshedHistory, registrationNumber)
+  ) {
+    return { vehicleHistory: refreshedHistory, vehicleHistoryVerified: true };
   }
 
   const trustedCurrentHistory = sanitizeVehicleHistory(currentHistory);
-  if (currentHistoryVerified === true && trustedCurrentHistory && historyMatchesRegistration(trustedCurrentHistory, registrationNumber)) {
-    return {vehicleHistory: trustedCurrentHistory, vehicleHistoryVerified: true};
+  if (
+    currentHistoryVerified === true &&
+    trustedCurrentHistory &&
+    historyMatchesRegistration(trustedCurrentHistory, registrationNumber)
+  ) {
+    return {
+      vehicleHistory: trustedCurrentHistory,
+      vehicleHistoryVerified: true,
+    };
   }
 
-  return {vehicleHistory: unavailableVehicleHistory(registrationNumber), vehicleHistoryVerified: false};
+  return {
+    vehicleHistory: unavailableVehicleHistory(registrationNumber),
+    vehicleHistoryVerified: false,
+  };
 }
 
-function prepareVehicleHistoryUpdate({current = {}, payload = {}, listing = {}} = {}) {
-  const nextListing = {...listing};
+function prepareVehicleHistoryUpdate({
+  current = {},
+  payload = {},
+  listing = {},
+} = {}) {
+  const nextListing = { ...listing };
   delete nextListing.vehicleHistoryVerified;
 
-  const currentRegistration = normalizeRegistrationNumber(current.registrationNumber);
+  const currentRegistration = normalizeRegistrationNumber(
+    current.registrationNumber,
+  );
   const registrationProvided = payload.registrationNumber !== undefined;
   const nextRegistration = registrationProvided
     ? normalizeRegistrationNumber(payload.registrationNumber)
     : currentRegistration;
-  const registrationChanged = registrationProvided && nextRegistration !== currentRegistration;
+  const registrationChanged =
+    registrationProvided && nextRegistration !== currentRegistration;
 
   if (registrationChanged) {
     nextListing.vehicleHistoryVerified = false;
@@ -168,11 +276,11 @@ function prepareVehicleHistoryUpdate({current = {}, payload = {}, listing = {}} 
   if (current.vehicleHistoryVerified === true) {
     delete nextListing.vehicleHistory;
     nextListing.vehicleHistoryVerified = true;
-    return {listing: nextListing, clearVehicleHistory: false};
+    return { listing: nextListing, clearVehicleHistory: false };
   }
 
   nextListing.vehicleHistoryVerified = false;
-  return {listing: nextListing, clearVehicleHistory: false};
+  return { listing: nextListing, clearVehicleHistory: false };
 }
 
 function validateListingPayload(payload = {}, options = {}) {
@@ -208,7 +316,10 @@ function validateListingPayload(payload = {}, options = {}) {
     recommendedPrice: asOptionalPositiveNumber(payload.recommendedPrice),
     valuationNote: asString(payload.valuationNote).slice(0, 500),
     motDueDate: asString(payload.motDueDate),
-    dateOfFirstRegistration: asString(payload.dateOfFirstRegistration).slice(0, 10),
+    dateOfFirstRegistration: asString(payload.dateOfFirstRegistration).slice(
+      0,
+      10,
+    ),
     serviceHistory: asString(payload.serviceHistory).toLowerCase(),
     seats: asOptionalPositiveNumber(payload.seats),
     doors: asOptionalPositiveNumber(payload.doors),
@@ -217,8 +328,13 @@ function validateListingPayload(payload = {}, options = {}) {
     co2Emissions: asString(payload.co2Emissions).slice(0, 40),
     insuranceGroup: asString(payload.insuranceGroup).slice(0, 20),
     fuelConsumptionUrban: asString(payload.fuelConsumptionUrban).slice(0, 40),
-    fuelConsumptionExtraUrban: asString(payload.fuelConsumptionExtraUrban).slice(0, 40),
-    fuelConsumptionCombined: asString(payload.fuelConsumptionCombined).slice(0, 40),
+    fuelConsumptionExtraUrban: asString(
+      payload.fuelConsumptionExtraUrban,
+    ).slice(0, 40),
+    fuelConsumptionCombined: asString(payload.fuelConsumptionCombined).slice(
+      0,
+      40,
+    ),
     lookupProvider: asString(payload.lookupProvider).slice(0, 80),
   };
 
@@ -261,7 +377,11 @@ function validateListingPayload(payload = {}, options = {}) {
   if (!allowPartial) {
     if (!listing.location) errors.push("Location is required.");
   }
-  if (payload.sellerPostcode !== undefined && listing.sellerPostcode && !isValidUkPostcode(listing.sellerPostcode)) {
+  if (
+    payload.sellerPostcode !== undefined &&
+    listing.sellerPostcode &&
+    !isValidUkPostcode(listing.sellerPostcode)
+  ) {
     errors.push("Enter a valid UK seller postcode.");
   }
   if (!allowPartial || payload.contactName !== undefined) {
@@ -275,16 +395,21 @@ function validateListingPayload(payload = {}, options = {}) {
   if (listing.showPhone && !listing.contactPhone) {
     errors.push("Phone number is required when phone contact is public.");
   }
-  if (payload.serviceHistory !== undefined && !SERVICE_HISTORY.includes(listing.serviceHistory)) {
+  if (
+    payload.serviceHistory !== undefined &&
+    !SERVICE_HISTORY.includes(listing.serviceHistory)
+  ) {
     errors.push("Service history is not supported.");
   }
 
-  const cleanListing = Object.fromEntries(Object.entries(listing).filter(([, value]) => value !== undefined));
-  return {listing: cleanListing, errors};
+  const cleanListing = Object.fromEntries(
+    Object.entries(listing).filter(([, value]) => value !== undefined),
+  );
+  return { listing: cleanListing, errors };
 }
 
 function validatePublishListing(listing = {}) {
-  const {errors} = validateListingPayload(listing);
+  const { errors } = validateListingPayload(listing);
 
   if (!Array.isArray(listing.images) || listing.images.length === 0) {
     errors.push("At least one vehicle photo is required.");
@@ -304,20 +429,31 @@ function hasActiveSubscription(profile = {}) {
   if (!activeStatuses.has(profile.subscriptionStatus)) return false;
 
   if (!profile.subscriptionCurrentPeriodEnd) return true;
-  const periodEnd = typeof profile.subscriptionCurrentPeriodEnd?.toDate === "function"
-    ? profile.subscriptionCurrentPeriodEnd.toDate()
-    : new Date(profile.subscriptionCurrentPeriodEnd);
+  const periodEnd =
+    typeof profile.subscriptionCurrentPeriodEnd?.toDate === "function"
+      ? profile.subscriptionCurrentPeriodEnd.toDate()
+      : new Date(profile.subscriptionCurrentPeriodEnd);
 
   return !Number.isNaN(periodEnd.getTime()) && periodEnd.getTime() > Date.now();
 }
 
-function validateSellerPublishRequirements({authUser = {}, profile = {}} = {}) {
+function validateSellerPublishRequirements({
+  authUser = {},
+  profile = {},
+} = {}) {
   const errors = [];
-  const emailVerified = authUser.email_verified === true || authUser.emailVerified === true || profile.emailVerified === true;
-  const phoneVerified = Boolean(authUser.phone_number || authUser.phoneNumber || profile.phoneVerified);
+  const emailVerified =
+    authUser.email_verified === true ||
+    authUser.emailVerified === true ||
+    profile.emailVerified === true;
+  const phoneVerified = Boolean(
+    authUser.phone_number || authUser.phoneNumber || profile.phoneVerified,
+  );
 
   if (!hasActiveSubscription(profile)) {
-    errors.push("An active MintMotor seller subscription is required before publishing.");
+    errors.push(
+      "An active MintMotor seller subscription is required before publishing.",
+    );
   }
   if (!emailVerified) {
     errors.push("Verify your email address before publishing.");
@@ -346,7 +482,7 @@ function validateEnquiryPayload(payload = {}) {
     errors.push("Message must be at least 10 characters.");
   }
 
-  return {enquiry, errors};
+  return { enquiry, errors };
 }
 
 function validateAdminCarPayload(payload = {}) {
@@ -373,7 +509,7 @@ function validateAdminCarPayload(payload = {}) {
     patch.adminNote = asString(payload.adminNote).slice(0, 500);
   }
 
-  return {patch, errors};
+  return { patch, errors };
 }
 
 function validateAdminEnquiryPayload(payload = {}) {
@@ -388,7 +524,7 @@ function validateAdminEnquiryPayload(payload = {}) {
     }
   }
 
-  return {patch, errors};
+  return { patch, errors };
 }
 
 function validateAdminUserPayload(payload = {}) {
@@ -412,7 +548,7 @@ function validateAdminUserPayload(payload = {}) {
     patch.phone = asString(payload.phone).slice(0, 40);
   }
 
-  return {patch, errors};
+  return { patch, errors };
 }
 
 module.exports = {
@@ -436,4 +572,3 @@ module.exports = {
   selectVehicleHistoryForPublish,
   prepareVehicleHistoryUpdate,
 };
-
