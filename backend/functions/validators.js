@@ -208,6 +208,7 @@ function validateListingPayload(payload = {}, options = {}) {
     recommendedPrice: asOptionalPositiveNumber(payload.recommendedPrice),
     valuationNote: asString(payload.valuationNote).slice(0, 500),
     motDueDate: asString(payload.motDueDate),
+    dateOfFirstRegistration: asString(payload.dateOfFirstRegistration).slice(0, 10),
     serviceHistory: asString(payload.serviceHistory).toLowerCase(),
     seats: asOptionalPositiveNumber(payload.seats),
     doors: asOptionalPositiveNumber(payload.doors),

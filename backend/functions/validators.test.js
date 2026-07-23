@@ -147,6 +147,7 @@ test("validateListingPayload accepts vehicle lookup and valuation fields", () =>
     valuationNote: "Adjusted for MOT mileage.",
     motDueDate: "2027-07-03",
     serviceHistory: "full",
+    dateOfFirstRegistration: "2018-04-21",
     seats: 5,
     doors: 5,
     previousOwners: 2,
@@ -166,6 +167,7 @@ test("validateListingPayload accepts vehicle lookup and valuation fields", () =>
   assert.equal(listing.seats, 5);
   assert.equal(listing.previousOwners, 2);
   assert.equal(listing.keysCount, 2);
+  assert.equal(listing.dateOfFirstRegistration, "2018-04-21");
   assert.equal(listing.lookupRaw, undefined);
 });
 
