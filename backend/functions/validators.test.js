@@ -405,3 +405,19 @@ test("prepareVehicleHistoryUpdate invalidates and clears history when registrati
   assert.equal(result.listing.vehicleHistoryVerified, false);
   assert.equal(result.clearVehicleHistory, true);
 });
+test("selectVehicleHistoryForPublish discards a matching attested snapshot after a UKVD not-found outcome", () => {
+  const result = selectVehicleHistoryForPublish({
+    lookup: {lookupProvider: "not-found"},
+    currentHistory: {
+      provider: "ukvehicledata",
+      registrationNumber: "AB12CDE",
+      summaryStatus: "clear",
+      stolen: {status: "clear", label: "Stolen vehicle"},
+    },
+    currentHistoryVerified: true,
+    registrationNumber: "AB12CDE",
+  });
+
+  assert.equal(result.vehicleHistoryVerified, false);
+  assert.equal(result.vehicleHistory.summaryStatus, "unavailable");
+});

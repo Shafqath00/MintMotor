@@ -720,6 +720,11 @@ app.post("/cars/:id/publish", requireAuth, async (req, res) => {
         mileage: car.mileage,
       });
     } catch (lookupError) {
+      verifiedLookup = {
+        lookupProvider: lookupError instanceof VehicleLookupError && lookupError.statusCode === 404
+          ? "not-found"
+          : "unavailable",
+      };
       logger.warn("Unable to refresh vehicle history before publishing", lookupError);
     }
     const historySelection = selectVehicleHistoryForPublish({

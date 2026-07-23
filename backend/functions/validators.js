@@ -129,6 +129,10 @@ function historyMatchesRegistration(history, registrationNumber) {
 }
 
 function selectVehicleHistoryForPublish({lookup = {}, currentHistory, currentHistoryVerified = false, registrationNumber} = {}) {
+  if (lookup.lookupProvider === "not-found") {
+    return {vehicleHistory: unavailableVehicleHistory(registrationNumber), vehicleHistoryVerified: false};
+  }
+
   const refreshedHistory = sanitizeVehicleHistory(lookup.vehicleHistory);
   if (lookup.lookupProvider === "ukvehicledata" && refreshedHistory && historyMatchesRegistration(refreshedHistory, registrationNumber)) {
     return {vehicleHistory: refreshedHistory, vehicleHistoryVerified: true};
