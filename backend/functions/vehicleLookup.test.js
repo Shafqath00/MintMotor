@@ -132,6 +132,67 @@ test("mapVehicleHistory never treats missing provider facts as clear", () => {
   assert.equal(history.summaryStatus, "unavailable");
 });
 
+test("mapVehicleHistory treats malformed provider values as unavailable", () => {
+  const history = mapVehicleHistory({
+    DataItems: {
+      VdiCheck: {
+        Finance: {RecordCount: "unknown"},
+        Stolen: {},
+        WrittenOff: "not-sure",
+        Scrapped: 0,
+        Imported: false,
+        Exported: true,
+      },
+    },
+  }, "AB12CDE", "2026-07-23T10:00:00.000Z");
+
+  assert.equal(history.outstandingFinance.status, "unavailable");
+  assert.equal(history.stolen.status, "unavailable");
+  assert.equal(history.writtenOff.status, "unavailable");
+  assert.equal(history.scrapped.status, "clear");
+  assert.equal(history.imported.status, "clear");
+  assert.equal(history.exported.status, "recorded");
+});
+
+test("mapVehicleHistory conforms MOT details to the VehicleHistoryCheck contract", () => {
+  const history = mapVehicleHistory(historyPayload.Response, "AB12CDE", "2026-07-23T10:00:00.000Z");
+
+  assert.equal(history.mot.status, "valid");
+  assert.equal(history.mot.expiryDate, "2027-03-04");
+  assert.equal(history.mot.latestResult, "passed");
+  assert.equal("dueDate" in history.mot, false);
+});
+
+test("mapVehicleHistory omits absent MOT facts and recognizes unavailable states", () => {
+  const expired = mapVehicleHistory({DataItems: {MotHistory: {MotDueDate: "2025-01-01", LatestResult: "unknown"}}}, "AB12CDE", "2026-07-23T10:00:00.000Z");
+  const notFound = mapVehicleHistory({DataItems: {MotHistory: {Status: "Not Found"}}}, "AB12CDE", "2026-07-23T10:00:00.000Z");
+  const unavailable = mapVehicleHistory({DataItems: {}}, "AB12CDE", "2026-07-23T10:00:00.000Z");
+
+  assert.equal(expired.mot.status, "expired");
+  assert.equal(expired.mot.expiryDate, "2025-01-01");
+  assert.equal("latestMileage" in expired.mot, false);
+  assert.equal("advisoryCount" in expired.mot, false);
+  assert.equal("failureCount" in expired.mot, false);
+  assert.equal("latestResult" in expired.mot, false);
+  assert.equal(notFound.mot.status, "not-found");
+  assert.equal(unavailable.mot.status, "unavailable");
+});
+
+test("lookup results do not expose raw UKVD provider payloads", async () => {
+  const originalEnv = {...process.env};
+  delete process.env.UKVD_API_KEY;
+  delete process.env.UKVD_PACKAGE_ID;
+
+  const mapped = mapUkvdResponse(historyPayload, {registrationNumber: "AB12CDE", mileage: 50000});
+  const seededFallback = await lookupVehicle({registrationNumber: "PL65VNG", mileage: 90485});
+  const manualFallback = await lookupVehicle({registrationNumber: "ZZ99ZZZ", mileage: 90485});
+
+  assert.equal("lookupRaw" in mapped, false);
+  assert.equal("lookupRaw" in seededFallback, false);
+  assert.equal("lookupRaw" in manualFallback, false);
+
+  process.env = originalEnv;
+});
 test("mapUkvdResponse includes normalized vehicle history", () => {
   const vehicle = mapUkvdResponse(historyPayload, {registrationNumber: "AB12CDE", mileage: 50000});
 

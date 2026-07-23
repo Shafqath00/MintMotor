@@ -162,31 +162,78 @@ function findFeatures(response = {}, dataItems = {}) {
   return [];
 }
 
-function historyItem(label, value, detail = "") {
-  if (value === undefined || value === null || value === "") {
-    return {status: "unavailable", label, detail: "Not supplied by provider"};
+function historyStatus(value) {
+  if (value === true || value === false) return value ? "recorded" : "clear";
+  if (typeof value === "number") return Number.isFinite(value) && value >= 0 ? (value > 0 ? "recorded" : "clear") : "unavailable";
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (["true", "yes", "recorded", "alert"].includes(normalized)) return "recorded";
+    if (["false", "no", "clear"].includes(normalized)) return "clear";
+    if (/^\d+$/.test(normalized)) return Number(normalized) > 0 ? "recorded" : "clear";
+    return "unavailable";
   }
+  if (!value || typeof value !== "object") return "unavailable";
 
-  const count = typeof value === "object" ? firstValue(value.RecordCount, value.Count, value.Total) : undefined;
-  const recorded = count !== undefined
-    ? asNumber(count, 0) > 0
-    : [true, "true", "yes", "recorded", "alert"].includes(String(value.Value ?? value).toLowerCase());
+  const count = firstValue(value.RecordCount, value.Count, value.Total);
+  if (count !== undefined) return historyStatus(count);
+  if (value.Value !== undefined) return historyStatus(value.Value);
+  if (value.Status !== undefined) return historyStatus(value.Status);
+  return "unavailable";
+}
 
+function historyItem(label, value, detail = "") {
+  const status = historyStatus(value);
   return {
-    status: recorded ? "recorded" : "clear",
+    status,
     label,
-    ...(detail || value?.Message ? {detail: detail || asText(value.Message)} : {}),
+    ...(status === "unavailable" ? {detail: detail || "Not supplied by provider"} : detail || value?.Message ? {detail: detail || asText(value.Message)} : {}),
   };
 }
 
-function mapMotSummary(mot = {}) {
+function validIsoDate(value) {
+  const date = isoDate(value);
+  return /^\d{4}-\d{2}-\d{2}$/.test(date) && !Number.isNaN(Date.parse(`${date}T00:00:00.000Z`)) ? date : "";
+}
+
+function optionalNonNegativeNumber(value) {
+  if (value === undefined || value === null || value === "") return undefined;
+  const number = asNumber(value, NaN);
+  return Number.isFinite(number) && number >= 0 ? number : undefined;
+}
+
+function normalizeMotResult(value) {
+  const result = asText(value).toLowerCase();
+  if (["pass", "passed"].includes(result)) return "passed";
+  if (["fail", "failed"].includes(result)) return "failed";
+  return undefined;
+}
+
+function explicitMotStatus(mot = {}) {
+  const status = asText(firstValue(mot.Status, mot.MotStatus, mot.ResultStatus)).toLowerCase();
+  if (["not found", "not-found", "no record"].includes(status)) return "not-found";
+  if (["valid", "current", "active"].includes(status)) return "valid";
+  if (status === "expired") return "expired";
+  return undefined;
+}
+
+function mapMotSummary(mot = {}, checkedAt = new Date().toISOString()) {
+  const expiryDate = validIsoDate(firstValue(mot.MotDueDate, mot.MotDue));
+  const latestTestDate = validIsoDate(mot.LatestTestDate);
+  const latestMileage = optionalNonNegativeNumber(mot.LatestMileage);
+  const advisoryCount = optionalNonNegativeNumber(mot.AdvisoryCount);
+  const failureCount = optionalNonNegativeNumber(mot.FailureCount);
+  const latestResult = normalizeMotResult(mot.LatestResult);
+  const providerStatus = explicitMotStatus(mot);
+  const status = providerStatus || (expiryDate ? (expiryDate >= String(checkedAt).slice(0, 10) ? "valid" : "expired") : "unavailable");
+
   return {
-    dueDate: isoDate(firstValue(mot.MotDueDate, mot.MotDue)),
-    latestMileage: asNumber(mot.LatestMileage, 0),
-    latestTestDate: isoDate(mot.LatestTestDate),
-    latestResult: asText(mot.LatestResult),
-    advisoryCount: asNumber(mot.AdvisoryCount, 0),
-    failureCount: asNumber(mot.FailureCount, 0),
+    status,
+    ...(expiryDate ? {expiryDate} : {}),
+    ...(latestMileage !== undefined ? {latestMileage} : {}),
+    ...(latestTestDate ? {latestTestDate} : {}),
+    ...(latestResult ? {latestResult} : {}),
+    ...(advisoryCount !== undefined ? {advisoryCount} : {}),
+    ...(failureCount !== undefined ? {failureCount} : {}),
   };
 }
 
@@ -214,7 +261,7 @@ function mapVehicleHistory(response, registrationNumber, checkedAt = new Date().
     registrationNumber: normalizeRegistration(registrationNumber),
     summaryStatus: statuses.includes("recorded") ? "attention" : statuses.every((status) => status === "clear") ? "clear" : "unavailable",
     ...items,
-    mot: mapMotSummary(mot),
+    mot: mapMotSummary(mot, checkedAt),
   };
 }
 function mapUkvdResponse(payload, {registrationNumber, mileage}) {
@@ -285,7 +332,6 @@ function mapUkvdResponse(payload, {registrationNumber, mileage}) {
     isNew: false,
     lookupProvider: "ukvehicledata",
     vehicleHistory: mapVehicleHistory(response, registrationNumber),
-    lookupRaw: payload,
   };
 }
 
@@ -341,7 +387,6 @@ function seededLookup(registrationNumber, mileage, reason = "") {
       recommendedPrice: Math.max(1000, Math.round((18000 - (Number(mileage) || 0) * 0.04) / 100) * 100),
       valuationNote: reason || "We could not match this registration yet. Add the vehicle details manually and use this as a starter valuation.",
       features: [],
-      lookupRaw: {matched: false, registrationNumber: normalized, reason},
     };
   }
 
@@ -366,7 +411,6 @@ function seededLookup(registrationNumber, mileage, reason = "") {
     isNew: false,
     lookupProvider: "seeded-fallback",
     valuationNote: reason || `Recommended from registration details and mileage of ${(Number(mileage) || 0).toLocaleString("en-GB")} miles.`,
-    lookupRaw: {matched: true, vehicle: seeded, reason},
   };
 }
 
