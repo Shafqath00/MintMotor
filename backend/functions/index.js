@@ -23,6 +23,7 @@ const {
 } = require("./validators");
 const { VehicleLookupError, lookupVehicle } = require("./vehicleLookup");
 const { publicCar, safeVehicleLookup } = require("./publicCar");
+const { EnquiryEmailDeliveryError, sendEnquiryEmail } = require("./enquiryEmail");
 
 const app = express();
 const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
@@ -829,12 +830,44 @@ app.post("/cars/:id/enquiries", async (req, res) => {
     }
 
     const car = carSnapshot.data();
+    if (car.allowEnquiries === false) {
+      res.status(409).json({ error: "This listing is not accepting enquiries." });
+      return;
+    }
+
+    const sellerEmail = String(car.contactEmail || car.ownerEmail || "").trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(sellerEmail)) {
+      res.status(422).json({ error: "This listing cannot receive enquiry emails." });
+      return;
+    }
+
+    const carTitle = `${car.year || ""} ${car.make || ""} ${car.model || ""}`.trim();
+    try {
+      await sendEnquiryEmail({
+        to: sellerEmail,
+        replyTo: enquiry.email,
+        carTitle,
+        carId: req.params.id,
+        enquiry,
+      }, {
+        apiKey: process.env.RESEND_API_KEY,
+        from: process.env.RESEND_FROM_EMAIL,
+      });
+    } catch (error) {
+      if (error instanceof EnquiryEmailDeliveryError) {
+        logger.error("Unable to deliver enquiry email", error);
+        res.status(502).json({ error: "Unable to deliver enquiry email." });
+        return;
+      }
+      throw error;
+    }
+
     const enquiryRef = await database.collection("enquiries").add({
       ...enquiry,
       carId: req.params.id,
-      carTitle: `${car.year || ""} ${car.make || ""} ${car.model || ""}`.trim(),
+      carTitle,
       sellerId: car.ownerId,
-      sellerEmail: car.contactEmail || car.ownerEmail || "",
+      sellerEmail,
       status: "new",
       createdAt: FieldValue.serverTimestamp(),
     });
