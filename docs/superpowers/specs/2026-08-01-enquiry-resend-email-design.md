@@ -9,7 +9,7 @@ When a buyer submits the existing public enquiry form for a published car, deliv
 - Keep the `CarDetail` page and `CarContactCard` form, client validation, success state, and request route unchanged.
 - Extend `POST /cars/:id/enquiries` to email the seller after validating the listing and buyer payload.
 - Send to the listing's `contactEmail`, falling back to `ownerEmail` when no contact email is available.
-- Include the car title, listing identifier, buyer name, email, optional phone, and message in a plain-text email.
+- Include the car title, listing identifier, buyer name, email, optional phone, and message in both a branded HTML email and plain-text fallback.
 - Set the buyer email as the email `reply_to` field so a seller can respond directly.
 - Continue storing successful enquiries with their current metadata in Firestore.
 - Configure Resend with server-only `RESEND_API_KEY` and `RESEND_FROM_EMAIL` variables.
@@ -26,7 +26,7 @@ The browser continues to submit to the existing backend endpoint. The backend re
 
 The endpoint will reject unavailable, sold, and enquiry-disabled listings before it attempts delivery. It will also return a controlled server error if either Resend environment variable is missing or if Resend rejects the send. The public client already displays the returned error message through the form's existing error state.
 
-For a valid request, the backend sends a Resend email using the REST API with the configured sender, seller recipient, buyer reply-to email, clear subject line, and a safely constructed plain-text body. After Resend accepts the message, the endpoint writes the current Firestore enquiry record and returns its id. This ordering avoids recording an enquiry as successfully delivered when the provider rejects it.
+For a valid request, the backend sends a Resend email using the REST API with the configured sender, seller recipient, buyer reply-to email, clear subject line, and safely escaped HTML and plain-text bodies. The HTML version is a conservative email-safe MintMotor template: a navy header, white content card, vehicle summary, buyer contact details, enquiry message, and a reply call to action. It uses table-based layout and inline styles for broad email-client compatibility. After Resend accepts the message, the endpoint writes the current Firestore enquiry record and returns its id. This ordering avoids recording an enquiry as successfully delivered when the provider rejects it.
 
 ## Data Flow
 
@@ -40,7 +40,7 @@ For a valid request, the backend sends a Resend email using the REST API with th
 
 ## Testing
 
-- Unit-test the email request builder/sender with a mocked `fetch`, asserting recipient, reply-to, subject, and plain-text body fields.
+- Unit-test the email request builder/sender with a mocked `fetch`, asserting recipient, reply-to, subject, plain-text body, HTML structure, and HTML escaping.
 - Assert a rejected Resend response becomes the controlled delivery failure.
 - Retain the existing frontend card test that verifies a valid enquiry invokes the API client and displays the success state.
 - Run the backend function tests, focused frontend contact-card tests, and frontend production build.
