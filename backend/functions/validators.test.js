@@ -37,6 +37,16 @@ test("validateListingPayload accepts a complete private seller listing", () => {
   assert.equal(listing.sellerPostcode, "SW1A 1AA");
 });
 
+test("validateListingPayload preserves a seller opting out of MintMotor enquiries", () => {
+  const { errors, listing } = validateListingPayload(
+    { allowEnquiries: false },
+    { partial: true },
+  );
+
+  assert.deepEqual(errors, []);
+  assert.equal(listing.allowEnquiries, false);
+});
+
 test("validateListingPayload rejects invalid public phone settings", () => {
   const { errors } = validateListingPayload({
     make: "BMW",
@@ -457,4 +467,11 @@ test("selectVehicleHistoryForPublish discards a matching attested snapshot after
 
   assert.equal(result.vehicleHistoryVerified, false);
   assert.equal(result.vehicleHistory.summaryStatus, "unavailable");
+});
+
+test("validateTrendingMakes keeps an ordered unique make list", () => {
+  const { validateTrendingMakes } = require("./validators");
+  const result = validateTrendingMakes({ trendingMakes: ["BMW", "Audi", "Tesla"] });
+  assert.deepEqual(result.errors, []);
+  assert.deepEqual(result.trendingMakes, ["BMW", "Audi", "Tesla"]);
 });

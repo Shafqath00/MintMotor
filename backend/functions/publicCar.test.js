@@ -33,6 +33,12 @@ test("publicCar only returns enabled contact details", () => {
   assert.equal(result.contactPhone, "+447700900000");
 });
 
+test("publicCar preserves the seller enquiry preference", () => {
+  const result = publicCar({allowEnquiries: false});
+
+  assert.equal(result.allowEnquiries, false);
+});
+
 test("safeVehicleLookup strips legacy provider raw data", () => {
   const result = safeVehicleLookup({
     make: "BMW",

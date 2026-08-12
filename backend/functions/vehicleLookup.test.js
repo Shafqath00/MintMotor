@@ -4,6 +4,7 @@ const {
   VehicleLookupError,
   buildUkvdUrl,
   lookupVehicle,
+  mapVehicleCheckReport,
   mapVehicleHistory,
   mapUkvdResponse,
   normalizeRegistration,
@@ -78,6 +79,55 @@ const historyPayload = {
   },
 };
 
+
+test("mapVehicleCheckReport creates a package-limited, normalized live report snapshot", () => {
+  const payload = {
+    Response: {
+      ...historyPayload.Response,
+      DataItems: {
+        ...historyPayload.Response.DataItems,
+        MiaftrDetails: {RecordCount: 0},
+        PncDetails: {Stolen: {RecordCount: 1, Message: "Police interest recorded"}},
+        MotHistoryDetails: {
+          MotDueDate: "2027-03-04",
+          MotTests: [
+            {TestDate: "2024-03-03", Mileage: 42100, Result: "Pass"},
+            {TestDate: "2025-03-03", Mileage: 46120, Result: "Pass"},
+          ],
+        },
+        VehicleTaxDetails: {TaxStatus: "Taxed", TaxDueDate: "2026-09-01"},
+        UkvdValuationDetails: {PrivateSale: 18000, Retail: 19600},
+        SpecAndOptionsDetails: {OptionList: [{Description: "Heated seats"}]},
+      },
+    },
+  };
+
+  const report = mapVehicleCheckReport(payload, "ab12 cde", "2026-08-02T10:00:00.000Z");
+
+  assert.equal(report.registrationNumber, "AB12CDE");
+  assert.equal(report.checkedAt, "2026-08-02T10:00:00.000Z");
+  assert.equal(report.vehicle.make, "Bmw");
+  assert.equal(report.mot.status, "valid");
+  assert.deepEqual(report.mot.mileageTimeline, [
+    {date: "2024-03-03", mileage: 42100, result: "passed"},
+    {date: "2025-03-03", mileage: 46120, result: "passed"},
+  ]);
+  assert.equal(report.tax.status, "taxed");
+  assert.equal(report.tax.expiryDate, "2026-09-01");
+  assert.equal(report.valuation.privateSale, 18000);
+  assert.equal(report.valuation.retail, 19600);
+  assert.deepEqual(report.specification.features, ["Heated seats"]);
+  assert.equal(report.checks.stolen.status, "recorded");
+  assert.equal(report.checks.writtenOff.status, "clear");
+  assert.deepEqual(report.excludedChecks, [
+    "Outstanding finance",
+    "Keeper information",
+    "Imported/exported status",
+    "Colour changes",
+    "Registration changes",
+  ]);
+  assert.equal("rawPayload" in report, false);
+});
 test("normalizeRegistration strips spaces and punctuation", () => {
   assert.equal(normalizeRegistration(" ab12 cde "), "AB12CDE");
 });
@@ -86,16 +136,44 @@ test("buildUkvdUrl uses configured package, key and VRM", () => {
   const original = {...process.env};
   process.env.UKVD_API_KEY = "test-key";
   process.env.UKVD_PACKAGE_ID = "package-id";
-  process.env.UKVD_API_BASE_URL = "https://uk1.ukvehicledata.co.uk/api/datapackage";
+  process.env.UKVD_API_BASE_URL = "https://uk.api.vehicledataglobal.com/r2/lookup";
 
   const url = new URL(buildUkvdUrl("AB12CDE"));
-  assert.equal(url.origin + url.pathname, "https://uk1.ukvehicledata.co.uk/api/datapackage/package-id");
-  assert.equal(url.searchParams.get("auth_apikey"), "test-key");
-  assert.equal(url.searchParams.get("key_VRM"), "AB12CDE");
+  assert.equal(url.origin + url.pathname, "https://uk.api.vehicledataglobal.com/r2/lookup");
+  assert.equal(url.searchParams.get("packagename"), "package-id");
+  assert.equal(url.searchParams.get("apikey"), "test-key");
+  assert.equal(url.searchParams.get("vrm"), "AB12CDE");
 
   process.env = original;
 });
 
+test("mapVehicleCheckReport maps the current Vehicle Data Global Results response", () => {
+  const payload = {
+    RequestInformation: {PackageName: "mintmotors", SearchTerm: "PL65VNG", SearchType: "VRM"},
+    ResponseInformation: {StatusCode: 0, StatusMessage: "Success", IsSuccessStatusCode: true, ResponseId: "response-1"},
+    Results: {
+      VehicleDetails: {VehicleIdentification: {Vrm: "PL65VNG", DvlaMake: "LAND ROVER", DvlaModel: "RANGE ROVER SPORT", YearOfManufacture: 2016, DateFirstRegistered: "2016-02-22T00:00:00Z", DvlaBodyType: "ESTATE", DvlaFuelType: "HEAVY OIL"}, DvlaTechnicalDetails: {NumberOfSeats: 5, EngineCapacityCc: 2993}},
+      ModelDetails: {ModelIdentification: {Make: "Land Rover", Model: "Range Rover Sport Autobiography Dynamic SDV6 Auto", ModelVariant: "SDV6 Autobiography Dynamic"}, BodyDetails: {BodyStyle: "SUV", NumberOfDoors: 5, NumberOfSeats: 5}, Powertrain: {FuelType: "Diesel", IceDetails: {EngineCapacityCc: 2993}, Transmission: {TransmissionType: "Automatic"}}},
+      MotHistoryDetails: {MotDueDate: "2027-07-03T00:00:00Z", MotTestDetailsList: [{TestDate: "2026-06-25T12:15:21Z", TestPassed: true, OdometerReading: "90485"}]},
+      PncDetails: {IsStolen: false}, MiaftrDetails: {WriteOffRecordList: []},
+      ValuationDetails: {ValuationFigures: {PrivateClean: 14608, DealerForecourt: 17495}},
+      VehicleTaxDetails: {TaxStatus: "Taxed", TaxDueDate: "2027-06-01T00:00:00Z"},
+      SpecAndOptionsDetails: {FactoryEquipmentList: [{Description: "Heated front seats"}]},
+    },
+  };
+  const report = mapVehicleCheckReport(payload, "PL65VNG", "2026-08-02T11:00:00.000Z");
+  assert.equal(report.reference, "response-1");
+  assert.equal(report.vehicle.make, "Land Rover");
+  assert.equal(report.vehicle.model, "Range Rover Sport Autobiography Dynamic Sdv6 Auto");
+  assert.equal(report.vehicle.transmission, "Automatic");
+  assert.deepEqual(report.mot.mileageTimeline, [{date: "2026-06-25", mileage: 90485, result: "passed"}]);
+  assert.equal(report.checks.stolen.status, "clear");
+  assert.equal(report.checks.writtenOff.status, "clear");
+  assert.equal(report.valuation.privateSale, 14608);
+  assert.equal(report.valuation.retail, 17495);
+  assert.equal(report.tax.status, "taxed");
+  assert.deepEqual(report.specification.features, ["Heated front seats"]);
+});
 test("mapUkvdResponse maps full UKVD vehicle details into MintMotor listing fields", () => {
   const vehicle = mapUkvdResponse(sampleUkvdPayload, {registrationNumber: "AB12CDE", mileage: 50000});
 

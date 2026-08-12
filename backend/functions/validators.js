@@ -312,6 +312,7 @@ function validateListingPayload(payload = {}, options = {}) {
     contactPhone: asString(payload.contactPhone),
     showEmail: asBoolean(payload.showEmail),
     showPhone: asBoolean(payload.showPhone),
+    allowEnquiries: payload.allowEnquiries !== false,
     isFeatured: asBoolean(payload.isFeatured),
     recommendedPrice: asOptionalPositiveNumber(payload.recommendedPrice),
     valuationNote: asString(payload.valuationNote).slice(0, 500),
@@ -527,6 +528,14 @@ function validateAdminEnquiryPayload(payload = {}) {
   return { patch, errors };
 }
 
+function validateTrendingMakes(payload = {}) {
+  const errors = [];
+  if (!Array.isArray(payload.trendingMakes)) return { trendingMakes: [], errors: ["Trending makes must be a list."] };
+  const trendingMakes = payload.trendingMakes.map((make) => asString(make)).filter(Boolean);
+  if (trendingMakes.length < 1 || trendingMakes.length > 4) errors.push("Choose between one and four trending makes.");
+  if (new Set(trendingMakes.map((make) => make.toLowerCase())).size !== trendingMakes.length) errors.push("Trending makes must be unique.");
+  return { trendingMakes, errors };
+}
 function validateAdminUserPayload(payload = {}) {
   const patch = {};
   const errors = [];
@@ -564,6 +573,7 @@ module.exports = {
   validateAdminCarPayload,
   validateAdminEnquiryPayload,
   validateAdminUserPayload,
+  validateTrendingMakes,
   validateEnquiryPayload,
   validateListingPayload,
   validatePublishListing,

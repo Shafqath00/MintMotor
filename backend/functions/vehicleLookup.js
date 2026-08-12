@@ -273,7 +273,137 @@ function mapVehicleHistory(response, registrationNumber, checkedAt = new Date().
     mot: mapMotSummary(mot, checkedAt),
   };
 }
+function documentValue(dataItems, response, ...names) {
+  for (const name of names) {
+    if (dataItems?.[name] !== undefined) return dataItems[name];
+    if (response?.[name] !== undefined) return response[name];
+  }
+  return {};
+}
+
+function mapMotTimeline(mot = {}) {
+  const tests = mot.MotTestDetailsList || mot.MotTests || mot.Tests || mot.MotHistory || mot.History || [];
+  if (!Array.isArray(tests)) return [];
+
+  return tests.map((entry) => {
+    const date = validIsoDate(firstValue(entry.TestDate, entry.Date, entry.CompletedDate));
+    const mileage = optionalNonNegativeNumber(firstValue(entry.Mileage, entry.Odometer, entry.OdometerReading));
+    const result = typeof entry.TestPassed === "boolean"
+      ? (entry.TestPassed ? "passed" : "failed")
+      : normalizeMotResult(firstValue(entry.Result, entry.TestResult, entry.Status));
+    return {
+      ...(date ? {date} : {}),
+      ...(mileage !== undefined ? {mileage} : {}),
+      ...(result ? {result} : {}),
+    };
+  }).filter((entry) => Object.keys(entry).length > 0);
+}
+
+function mapTaxStatus(value) {
+  const status = asText(value).toLowerCase();
+  if (status.includes("sorn")) return "sorn";
+  if (status.includes("untaxed") || status.includes("not taxed")) return "untaxed";
+  if (status.includes("taxed")) return "taxed";
+  return "unavailable";
+}
+
+function mapVehicleCheckReport(payload, registrationNumber, checkedAt = new Date().toISOString()) {
+  if (payload?.Results) {
+    const results = payload.Results;
+    const vehicle = mapUkvdResponse(payload, {registrationNumber, mileage: 0});
+    const motSource = results.MotHistoryDetails || {};
+    const latestTest = Array.isArray(motSource.MotTestDetailsList) ? motSource.MotTestDetailsList[0] || {} : {};
+    const pncSource = results.PncDetails || {};
+    const miaftrSource = results.MiaftrDetails || {};
+    const valuationFigures = results.ValuationDetails?.ValuationFigures || {};
+    const taxSource = results.VehicleTaxDetails || {};
+    const featureList = results.SpecAndOptionsDetails?.FactoryEquipmentList || [];
+    return {
+      reference: asText(payload.ResponseInformation?.ResponseId, `${normalizeRegistration(registrationNumber)}-${checkedAt}`),
+      registrationNumber: normalizeRegistration(firstValue(vehicle.registrationNumber, registrationNumber)), checkedAt,
+      vehicle: {make: vehicle.make, model: vehicle.model, variant: vehicle.variant, year: vehicle.year, fuelType: vehicle.fuelType, transmission: vehicle.transmission, bodyType: vehicle.bodyType, engineSize: vehicle.engineSize, color: vehicle.color, dateOfFirstRegistration: vehicle.dateOfFirstRegistration},
+      mot: {...mapMotSummary({...motSource, LatestMileage: latestTest.OdometerReading, LatestResult: latestTest.TestPassed}, checkedAt), mileageTimeline: mapMotTimeline(motSource)},
+      tax: {status: mapTaxStatus(taxSource.TaxStatus), ...(validIsoDate(taxSource.TaxDueDate) ? {expiryDate: validIsoDate(taxSource.TaxDueDate)} : {detail: "Not supplied by provider"})},
+      valuation: {privateSale: asNumber(firstValue(valuationFigures.PrivateClean, valuationFigures.PrivateAverage), 0), retail: asNumber(firstValue(valuationFigures.DealerForecourt, valuationFigures.TradeRetail), 0)},
+      specification: {features: Array.isArray(featureList) ? featureList.map((item) => asText(item.Description || item.Name)).filter(Boolean) : []},
+      checks: {stolen: historyItem("Police stolen status", pncSource.IsStolen), writtenOff: historyItem("Insurance write-off", Array.isArray(miaftrSource.WriteOffRecordList) ? miaftrSource.WriteOffRecordList.length : undefined)},
+      excludedChecks: ["Outstanding finance", "Keeper information", "Imported/exported status", "Colour changes", "Registration changes"],
+    };
+  }
+  const response = payload?.Response || payload?.response || payload || {};
+  const dataItems = response.DataItems || response.dataItems || {};
+  const vehicle = mapUkvdResponse(payload, {registrationNumber, mileage: 0});
+  const motSource = documentValue(dataItems, response, "MotHistoryDetails", "MotHistory");
+  const taxSource = documentValue(dataItems, response, "VehicleTaxDetails", "VehicleTax", "TaxDetails");
+  const valuationSource = documentValue(dataItems, response, "UkvdValuationDetails", "UKVDValuationDetails", "Valuation", "Valuations");
+  const specificationSource = documentValue(dataItems, response, "SpecAndOptionsDetails", "SpecificationAndOptions", "Specification");
+  const pncSource = documentValue(dataItems, response, "PncDetails", "PNCDetails", "Pnc", "PNC");
+  const miaftrSource = documentValue(dataItems, response, "MiaftrDetails", "MIAFTRDetails", "Miaftr", "MIAFTR");
+  const taxExpiryDate = validIsoDate(firstValue(taxSource.TaxDueDate, taxSource.ExpiryDate, taxSource.Expiry, taxSource.DueDate));
+  const specFeatures = specificationSource.OptionList || specificationSource.Options || specificationSource.FeatureList || specificationSource.Features || [];
+
+  return {
+    reference: asText(firstValue(response.Reference, response.ReferenceNumber, response.StatusInformation?.Lookup?.Reference, `${normalizeRegistration(registrationNumber)}-${checkedAt}`)),
+    registrationNumber: normalizeRegistration(firstValue(vehicle.registrationNumber, registrationNumber)),
+    checkedAt,
+    vehicle: {
+      make: vehicle.make,
+      model: vehicle.model,
+      variant: vehicle.variant,
+      year: vehicle.year,
+      fuelType: vehicle.fuelType,
+      transmission: vehicle.transmission,
+      bodyType: vehicle.bodyType,
+      engineSize: vehicle.engineSize,
+      color: vehicle.color,
+      dateOfFirstRegistration: vehicle.dateOfFirstRegistration,
+    },
+    mot: {
+      ...mapMotSummary(motSource, checkedAt),
+      mileageTimeline: mapMotTimeline(motSource),
+    },
+    tax: {
+      status: mapTaxStatus(firstValue(taxSource.TaxStatus, taxSource.Status, taxSource.VehicleTaxStatus)),
+      ...(taxExpiryDate ? {expiryDate: taxExpiryDate} : {detail: "Not supplied by provider"}),
+    },
+    valuation: {
+      privateSale: asNumber(firstValue(valuationSource.PrivateSale, valuationSource.PrivateSaleValue), 0),
+      retail: asNumber(firstValue(valuationSource.Retail, valuationSource.RetailValue), 0),
+    },
+    specification: {
+      features: Array.isArray(specFeatures)
+        ? specFeatures.map((item) => asText(item.Description || item.Name || item.OptionName || item)).filter(Boolean)
+        : [],
+    },
+    checks: {
+      stolen: historyItem("Police stolen status", firstValue(pncSource.Stolen, pncSource.StolenStatus, pncSource)),
+      writtenOff: historyItem("Insurance write-off", firstValue(miaftrSource.WrittenOff, miaftrSource.WriteOff, miaftrSource)),
+    },
+    excludedChecks: [
+      "Outstanding finance",
+      "Keeper information",
+      "Imported/exported status",
+      "Colour changes",
+      "Registration changes",
+    ],
+  };
+}
 function mapUkvdResponse(payload, {registrationNumber, mileage}) {
+  if (payload?.Results) {
+    const results = payload.Results;
+    const identification = results.VehicleDetails?.VehicleIdentification || {};
+    const technical = results.VehicleDetails?.DvlaTechnicalDetails || {};
+    const model = results.ModelDetails || {};
+    const modelIdentification = model.ModelIdentification || {};
+    const body = model.BodyDetails || {};
+    const powertrain = model.Powertrain || {};
+    const engineCapacity = firstValue(powertrain.IceDetails?.EngineCapacityCc, technical.EngineCapacityCc);
+    const make = titleCase(firstValue(modelIdentification.Make, identification.DvlaMake));
+    const modelName = titleCase(firstValue(modelIdentification.Model, identification.DvlaModel));
+    if (!make && !modelName) throw new VehicleLookupError("Vehicle not found for that registration number.", 404, payload);
+    const recommendedPrice = asNumber(firstValue(results.ValuationDetails?.ValuationFigures?.DealerForecourt, results.ValuationDetails?.ValuationFigures?.PrivateClean), 0);
+    return {registrationNumber: normalizeRegistration(firstValue(identification.Vrm, registrationNumber)), make, model: modelName, variant: titleCase(modelIdentification.ModelVariant), year: asNumber(identification.YearOfManufacture, new Date().getFullYear()), price: recommendedPrice, mileage: Number(mileage) || 0, fuelType: normalizeFuelType(firstValue(powertrain.FuelType, identification.DvlaFuelType)), transmission: normalizeTransmission(powertrain.Transmission?.TransmissionType), bodyType: titleCase(firstValue(body.BodyStyle, identification.DvlaBodyType)), engineSize: asNumber(engineCapacity, 0) ? `${(asNumber(engineCapacity, 0) / 1000).toFixed(1)}L` : "", color: titleCase(results.MotHistoryDetails?.Colour), dateOfFirstRegistration: isoDate(firstValue(identification.DateFirstRegistered, identification.DateFirstRegisteredInUk)), motDueDate: isoDate(results.MotHistoryDetails?.MotDueDate), seats: asNumber(firstValue(body.NumberOfSeats, technical.NumberOfSeats), undefined), doors: asNumber(body.NumberOfDoors, undefined), recommendedPrice, valuationNote: "Vehicle Data Global live valuation.", features: (results.SpecAndOptionsDetails?.FactoryEquipmentList || []).map((item) => asText(item.Description || item.Name)).filter(Boolean), images: [], location: "", sellerPostcode: "", description: "", attentionGrabber: "", contactName: "", contactEmail: "", contactPhone: "", showEmail: false, showPhone: false, isFeatured: false, isNew: false, lookupProvider: "ukvehicledata"};
+  }
   const response = payload?.Response || payload?.response || payload || {};
   const registration = response.VehicleRegistration || response.vehicleRegistration || {};
   const smmt = response.SmmtDetails || response.SMMTDetails || response.smmtDetails || {};
@@ -348,27 +478,19 @@ function buildUkvdUrl(vrm) {
   const apiKey = process.env.UKVD_API_KEY;
   const packageId = process.env.UKVD_PACKAGE_ID;
   if (!apiKey || !packageId) return "";
-
-  const baseUrl = (process.env.UKVD_API_BASE_URL || "https://uk1.ukvehicledata.co.uk/api/datapackage").replace(/\/$/, "");
-  const url = new URL(`${baseUrl}/${encodeURIComponent(packageId)}`);
-  url.searchParams.set("v", "2");
-  url.searchParams.set("api_nullitems", "1");
-  url.searchParams.set("auth_apikey", apiKey);
-  url.searchParams.set("key_VRM", vrm);
+  const baseUrl = process.env.UKVD_API_BASE_URL || "https://uk.api.vehicledataglobal.com/r2/lookup";
+  const url = new URL(baseUrl);
+  url.searchParams.set("packagename", packageId);
+  url.searchParams.set("apikey", apiKey);
+  url.searchParams.set("vrm", vrm);
   return url.toString();
 }
-
 async function fetchUkvdVehicle(registrationNumber) {
   const normalized = normalizeRegistration(registrationNumber);
   const url = buildUkvdUrl(normalized);
   if (!url) return null;
 
-  const response = await fetch(url, {
-    headers: {
-      Accept: "application/json",
-      Authorization: process.env.UKVD_API_KEY,
-    },
-  });
+  const response = await fetch(url, {headers: {Accept: "application/json"}});
   const payload = await response.json().catch(() => ({}));
 
   if (!response.ok) {
@@ -376,6 +498,9 @@ async function fetchUkvdVehicle(registrationNumber) {
     throw new VehicleLookupError("Unable to fetch vehicle details from UK Vehicle Data.", statusCode, payload);
   }
 
+  if (payload?.ResponseInformation && payload.ResponseInformation.IsSuccessStatusCode === false) {
+    throw new VehicleLookupError(payload.ResponseInformation.StatusMessage || "Unable to fetch vehicle details from Vehicle Data Global.", 502, payload);
+  }
   const lookupStatus = payload?.Response?.StatusInformation?.Lookup?.StatusCode || payload?.Response?.StatusCode;
   if (lookupStatus && !/^success$/i.test(String(lookupStatus))) {
     throw new VehicleLookupError("Vehicle not found for that registration number.", 404, payload);
@@ -384,6 +509,14 @@ async function fetchUkvdVehicle(registrationNumber) {
   return payload;
 }
 
+async function fetchVehicleCheckReport(registrationNumber, checkedAt = new Date().toISOString()) {
+  const normalized = normalizeRegistration(registrationNumber);
+  const payload = await fetchUkvdVehicle(normalized);
+  if (!payload) {
+    throw new VehicleLookupError("Live vehicle checks are not configured.", 503);
+  }
+  return mapVehicleCheckReport(payload, normalized, checkedAt);
+}
 function seededLookup(registrationNumber, mileage, reason = "") {
   const normalized = normalizeRegistration(registrationNumber);
   const seeded = SEEDED_VEHICLES[normalized] || null;
@@ -439,6 +572,8 @@ async function lookupVehicle({registrationNumber, mileage}) {
 module.exports = {
   VehicleLookupError,
   lookupVehicle,
+  fetchVehicleCheckReport,
+  mapVehicleCheckReport,
   normalizeRegistration,
   mapUkvdResponse,
   mapVehicleHistory,

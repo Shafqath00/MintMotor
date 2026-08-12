@@ -3,7 +3,9 @@ admin.initializeApp();
 
 const database = admin.firestore();
 database.settings({
-    databaseId:"mintmotor"
+    databaseId: "mintmotor"
 });
 
-module.exports = {database};
+const storage = admin.storage();
+
+module.exports = {admin, database, storage};

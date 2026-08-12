@@ -21,12 +21,14 @@ const {
   selectVehicleHistoryForPublish,
   prepareVehicleHistoryUpdate,
 } = require("./validators");
-const { VehicleLookupError, lookupVehicle } = require("./vehicleLookup");
+const { VehicleLookupError, fetchVehicleCheckReport, lookupVehicle } = require("./vehicleLookup");
+const { createVehicleCheckStore } = require("./vehicleCheckStore");
 const { publicCar, safeVehicleLookup } = require("./publicCar");
 const { EnquiryEmailDeliveryError, sendEnquiryEmail } = require("./enquiryEmail");
 
 const app = express();
 const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
+const vehicleCheckStore = createVehicleCheckStore({ database, fetchReport: fetchVehicleCheckReport });
 
 function getMissingStripeBillingConfig() {
   return [
@@ -69,7 +71,7 @@ app.use((req, res, next) => {
   res.set("Access-Control-Allow-Origin", req.get("origin") || "*");
   res.set("Vary", "Origin");
   res.set("Access-Control-Allow-Headers", "Authorization, Content-Type");
-  res.set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS");
+  res.set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
 
   if (req.method === "OPTIONS") {
     res.status(204).send("");
@@ -272,7 +274,7 @@ function applyCarFilters(cars, query) {
   if (query.transmission) results = results.filter((car) => car.transmission === query.transmission);
   if (query.featured === "true") results = results.filter((car) => car.isFeatured);
   if (query.condition === "new" || query.isNew === "true") results = results.filter((car) => car.isNew === true);
-  if (query.condition === "used" || query.isNew === "false") results = results.filter((car) => car.isNew === false);
+  if (query.condition === "used" || query.isNew === "false") results = results.filter((car) => car.isNew !== true);
   if (query.minPrice) results = results.filter((car) => Number(car.price) >= Number(query.minPrice));
   if (query.maxPrice) results = results.filter((car) => Number(car.price) <= Number(query.maxPrice));
   if (text) {
@@ -472,6 +474,50 @@ app.post("/vehicle-lookup", requireAuth, async (req, res) => {
   }
 });
 
+
+app.post("/vehicle-checks", requireAuth, async (req, res) => {
+  try {
+    const registrationNumber = String(req.body.registrationNumber || "");
+    if (!registrationNumber.trim()) {
+      res.status(400).json({ error: "Registration number is required." });
+      return;
+    }
+
+    const report = await vehicleCheckStore.create(req.user.uid, registrationNumber);
+    res.status(201).json({ report });
+  } catch (error) {
+    logger.error("Vehicle check failed", error);
+    if (error instanceof VehicleLookupError) {
+      res.status(error.statusCode === 404 ? 404 : 502).json({ error: error.message });
+      return;
+    }
+    res.status(502).json({ error: "Unable to create a live vehicle check report." });
+  }
+});
+
+app.get("/vehicle-checks", requireAuth, async (req, res) => {
+  try {
+    const reports = await vehicleCheckStore.list(req.user.uid);
+    res.json({ reports });
+  } catch (error) {
+    logger.error("Unable to list vehicle checks", error);
+    res.status(500).json({ error: "Unable to load vehicle check reports." });
+  }
+});
+
+app.get("/vehicle-checks/:reportId", requireAuth, async (req, res) => {
+  try {
+    const report = await vehicleCheckStore.get(req.user.uid, req.params.reportId);
+    if (!report) {
+      res.status(404).json({ error: "Vehicle check report not found." });
+      return;
+    }
+    res.json({ report });
+  } catch (error) {
+    logger.error("Unable to load vehicle check", error);
+    res.status(500).json({ error: "Unable to load vehicle check report." });
+  }
+});
 app.get("/me/subscription", requireAuth, async (req, res) => {
   try {
     const profile = await getUserProfile(req.user.uid);
@@ -1119,6 +1165,29 @@ app.patch("/admin/users/:uid", requireAdmin, async (req, res) => {
   } catch (error) {
     logger.error("Failed to update admin user", error);
     res.status(500).json({ error: "Unable to update user." });
+  }
+});
+
+app.get("/platform-settings/homepage", async (req, res) => {
+  try {
+    const doc = await database.collection("platform_settings").doc("homepage").get();
+    res.json(doc.exists ? doc.data() : {});
+  } catch (error) {
+    logger.error("Failed to fetch homepage settings", error);
+    res.status(500).json({ error: "Unable to fetch homepage settings." });
+  }
+});
+
+app.put("/admin/platform-settings/homepage", requireAdmin, async (req, res) => {
+  try {
+    const patch = { ...req.body, updatedAt: FieldValue.serverTimestamp() };
+    await database.collection("platform_settings").doc("homepage").set(patch, { merge: true });
+    
+    const updated = await database.collection("platform_settings").doc("homepage").get();
+    res.json(updated.exists ? updated.data() : {});
+  } catch (error) {
+    logger.error("Failed to update homepage settings", error);
+    res.status(500).json({ error: "Unable to update homepage settings." });
   }
 });
 
