@@ -7,6 +7,25 @@ Mint Motor runs as two sites on one shared vehicle listing system:
 
 This replaces the 2026-10-30 plan to retire paid seller adverts. **Do not run the seller plan retirement migration.** `backend/scripts/retire-seller-plans.js --apply` now refuses to run.
 
+## The Dealer website
+
+`dealer.mintmotor.co.uk` is a complete marketplace website branded **Mint Motor Dealers**, not a dashboard. It uses the main site's brand blue with a navy and amber dealer theme (the `theme-dealer` class, set from the hostname).
+
+| Path | Page | Access |
+|---|---|---|
+| `/` | Home: hero search, services, how it works, plan teaser (newest exclusive cars once signed in) | Public marketing, no listing data |
+| `/plans`, `/how-it-works` | Plans from the public `GET /dealer-plans`; FAQ | Public |
+| `/login`, `/apply` | Split-screen sign in; three-step onboarding | Public |
+| `/browse`, `/browse/:id` | Dealer-only private-seller cars: search, filters, sort; full detail page and offer form | Approved dealer |
+| `/list`, `/list/:id/edit` | Add one car or bulk upload; edit a listing | Approved dealer |
+| `/my-listings` | Stock with plan usage, publish, mark sold, withdraw | Approved dealer |
+| `/enquiries`, `/profile` | Offers; business profile, billing, security, delete account | Approved dealer |
+
+- Old `/dealer/...` links, Stripe returns and activation emails redirect to these paths. The API now builds new links to `/plans` and `/login` on the dealer site.
+- Dealer cars still go live on the main site as soon as they are published (no staff approval step).
+- The site is an installable web app (`dealer.webmanifest`, icons in `public/dealer-icons`), linked only on the dealer host. There is no native app in this repository.
+- New API: `GET /dealer-plans` (public, plan names, prices and limits only), `POST /dealer/cars/:id/status` (withdraw to draft or mark sold), and `/dealer/network/cars` now also filters by `model`, `minYear`, `maxYear`, `maxMileage` and sorts by `year-desc`.
+
 ## Visibility rules
 
 The backend decides visibility; clients cannot set `visibility`, `sellerType` or `isFeatured`.
@@ -48,12 +67,15 @@ There is one Firebase Auth pool, but each account is either a buyer/seller or a 
 1. Back up the named `mintmotor` Firestore database and the bucket.
 2. Run `node backend/scripts/audit-role-overlap.js` (read-only) and resolve every account it lists that is both a dealer and a seller before the role lock goes live.
 3. Deploy the functions, Firestore rules and Storage rules together, then both hosting targets (`main` and `dealer`). Point `dealer.mintmotor.co.uk` at the `dealer` target.
-4. Check on the live sites:
+4. Set `DEALER_FRONTEND_URL` for the functions (default `https://dealer.mintmotor.co.uk`) so activation emails and Stripe returns land on the dealer site.
+5. Check on the live sites:
    - a dealer-only listing 404s on the main site;
    - an approved dealer sees it in the portal;
    - a paid public advert shows on the main site;
    - a dealer can't sign in on the main site;
-   - a seller can't sign in on the dealer portal.
+   - a seller can't sign in on the dealer portal;
+   - a signed-out visitor to `/browse` is sent to `/login`, and the home and plans pages show no listings;
+   - the dealer site can be installed to a phone home screen.
 
 ## Tests
 

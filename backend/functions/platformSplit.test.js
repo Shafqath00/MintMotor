@@ -118,3 +118,34 @@ test('dealer bulk upload creates valid draft rows and reports the rest',async()=
   assert.equal(again.status,200);assert.equal(again.body.created,0);assert.match(JSON.stringify(again.body),/already in your inventory/);
   assert.equal((await request(app).post('/dealer/cars/bulk').set('Authorization','Bearer owner').send({rows})).status,403);
 });
+
+test('plans are public marketing data; dealer-only cars stay behind a dealer login and support year/mileage filters',async()=>{
+  const {app,db,car,seed}=setup();await seed();
+  const plans=await request(app).get('/dealer-plans');
+  assert.equal(plans.status,200);assert.ok(plans.body.tiers.length>3);
+  assert.deepEqual(Object.keys(plans.body.tiers[0]).sort(),['activeLimit','featuredLimit','key','monthlyPricePence','name','selfService']);
+  assert.equal((await request(app).get('/dealer/network/cars')).status,401);
+  assert.equal((await request(app).get('/dealer/network/cars').set('Authorization','Bearer owner')).status,403);
+  await db.collection('cars').doc('older').set({...car,year:2012,mileage:90000});
+  const ids=async q=>(await request(app).get('/dealer/network/cars'+q).set('Authorization','Bearer dealer')).body.cars.map(c=>c.id).sort();
+  assert.deepEqual(await ids(''),['older','private']);
+  assert.deepEqual(await ids('?minYear=2015'),['private']);
+  assert.deepEqual(await ids('?maxMileage=1000'),['private']);
+  assert.deepEqual(await ids('?model=focus&maxYear=2015'),['older']);
+});
+
+test('dealers can withdraw or mark sold their own cars; others cannot, and active is only reachable by publishing',async()=>{
+  const {app,db,seed}=setup();await seed();
+  await db.collection('cars').doc('mine').set({dealerId:'dealer',ownerId:'dealer',sellerType:'dealer',ownerType:'dealer',visibility:'public',status:'active',make:'Ford',model:'Focus'});
+  await db.collection('cars').doc('theirs').set({dealerId:'other-dealer',ownerId:'other-dealer',sellerType:'dealer',visibility:'public',status:'active'});
+  const call=(id,body,token='dealer')=>request(app).post('/dealer/cars/'+id+'/status').set('Authorization','Bearer '+token).send(body);
+  assert.equal((await call('mine',{status:'active'})).status,400);
+  assert.equal((await call('mine',{status:'published'})).status,400);
+  assert.equal((await call('theirs',{status:'draft'})).status,403);
+  assert.equal((await call('missing',{status:'draft'})).status,404);
+  assert.equal((await call('mine',{status:'draft'},'owner')).status,403);
+  const sold=await call('mine',{status:'sold'});assert.equal(sold.status,200,JSON.stringify(sold.body));assert.equal(sold.body.car.status,'sold');
+  assert.equal((await call('mine',{status:'draft'})).body.car.status,'draft');
+  assert.equal((await db.collection('cars').doc('theirs').get()).data().status,'active');
+  assert.equal((await request(app).get('/cars/mine')).status,404);
+});

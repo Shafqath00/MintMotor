@@ -368,6 +368,10 @@ function applyCarFilters(cars, query) {
   if (query.featured === "true") results = results.filter((car) => car.isFeatured);
   if (query.condition === "new" || query.isNew === "true") results = results.filter((car) => car.isNew === true);
   if (query.condition === "used" || query.isNew === "false") results = results.filter((car) => car.isNew !== true);
+  if (query.model) results = results.filter((car) => String(car.model).toLowerCase() === String(query.model).toLowerCase());
+  if (query.minYear) results = results.filter((car) => Number(car.year) >= Number(query.minYear));
+  if (query.maxYear) results = results.filter((car) => Number(car.year) <= Number(query.maxYear));
+  if (query.maxMileage) results = results.filter((car) => Number(car.mileage) <= Number(query.maxMileage));
   if (query.minPrice) results = results.filter((car) => Number(car.price) >= Number(query.minPrice));
   if (query.maxPrice) results = results.filter((car) => Number(car.price) <= Number(query.maxPrice));
   if (text) {
@@ -386,6 +390,9 @@ function applyCarFilters(cars, query) {
       break;
     case "mileage-asc":
       results.sort((a, b) => Number(a.mileage) - Number(b.mileage));
+      break;
+    case "year-desc":
+      results.sort((a, b) => Number(b.year) - Number(a.year));
       break;
     default:
       results.sort((a, b) => toMillis(b.publishedAt || b.createdAt) - toMillis(a.publishedAt || a.createdAt));
@@ -488,7 +495,7 @@ const dealerLifecycleDependencies = {
   USER_ROLES,
   DEALER_STATUS,
   logger,
-  getFrontendUrl: () => (process.env.DEALER_ACTIVATION_CONTINUE_URL || `${process.env.FRONTEND_URL || "https://mintmotor.co.uk"}/dealer/login`).replace(/\/$/, ""),
+  getFrontendUrl: () => (process.env.DEALER_ACTIVATION_CONTINUE_URL || `${dealershipUrl()}/login`).replace(/\/$/, ""),
   sendActivationEmail: (input) => sendDealerActivationEmail(input, { apiKey: process.env.RESEND_API_KEY, from: process.env.RESEND_FROM_EMAIL }),
 };
 const approveDealer = (input) => approveDealerLifecycle(input, dealerLifecycleDependencies);
@@ -974,6 +981,11 @@ app.get("/dealer/me", requireDealer, async (req, res) => {
   res.json({ dealer: serializeDealer({ ...req.dealer, emailVerified: user.emailVerified === true }) });
 });
 
+// Marketing data for the signed-out Dealer site: plan names, prices and limits only.
+app.get("/dealer-plans", (_req, res) => {
+  res.json({ tiers: publicDealerTiers() });
+});
+
 app.get("/dealer/tiers", requireDealer, (_req, res) => {
   res.json({ tiers: publicDealerTiers() });
 });
@@ -996,7 +1008,7 @@ app.post("/dealer/billing/customer-portal", requireDealer, requireAccountActive,
     const stripe = getStripeClient();
     if (!stripe) return res.status(503).json({ error: "Stripe billing is not configured." });
     const frontendUrl = (process.env.FRONTEND_URL || req.get("origin") || "https://mintmotor.web.app").replace(/\/$/, "");
-    const session = await createCustomerPortalSession({ stripe, customerId: req.dealer.stripeDealerCustomerId, returnUrl: `${frontendUrl}/dealer/plan` });
+    const session = await createCustomerPortalSession({ stripe, customerId: req.dealer.stripeDealerCustomerId, returnUrl: `${frontendUrl}/plans` });
     return res.json({ url: session.url });
   } catch (error) {
     const status = /no Stripe customer/i.test(error.message) ? 409 : 500;
@@ -1051,8 +1063,8 @@ app.post("/dealer/billing/checkout-session", requireDealer, requireAccountActive
       mode: "subscription",
       managed_payments: { enabled: false },
       line_items: [{ price: priceId, quantity: 1 }],
-      success_url: `${frontendUrl}/dealer/plan?checkout=success&session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${frontendUrl}/dealer/plan?checkout=cancelled`,
+      success_url: `${frontendUrl}/plans?checkout=success&session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${frontendUrl}/plans?checkout=cancelled`,
       client_reference_id: req.dealer.id,
       metadata: { firebaseUid: req.dealer.id, dealerTierKey: tierKey, legalPolicyVersion: LEGAL_POLICY_VERSION, immediateServiceAcknowledged: "true" },
       subscription_data: { metadata: { firebaseUid: req.dealer.id, dealerTierKey: tierKey, legalPolicyVersion: LEGAL_POLICY_VERSION, immediateServiceAcknowledged: "true" } },
@@ -1504,6 +1516,17 @@ app.patch("/dealer/cars/:id", requireDealer, requireAccountActive, async (req, r
     throw error;
   }
   res.json({ car: serializeDealerCar(await database.collection("cars").doc(req.params.id).get(), privateResult.privateData) });
+});
+
+// Dealers withdraw a car to a draft or mark it sold. Going live only happens through publish, which enforces the plan limits.
+app.post("/dealer/cars/:id/status", requireDealer, requireAccountActive, async (req, res) => {
+  const status = String(req.body?.status || "").toLowerCase();
+  if (![DEALER_LISTING_STATUS.DRAFT, DEALER_LISTING_STATUS.SOLD].includes(status)) return res.status(400).json({ error: "Use publish to make a listing live. Only draft (withdraw) and sold are supported here." });
+  const record = await getDealerPrivateCar(req.params.id);
+  if (!record) return res.status(404).json({ error: "Listing not found." });
+  if (record.car.dealerId !== req.dealer.id) return res.status(403).json({ error: "You can only change your own listings." });
+  await database.collection("cars").doc(req.params.id).set({ status, updatedAt: FieldValue.serverTimestamp() }, { merge: true });
+  res.json({ car: serializeDealerCar(await database.collection("cars").doc(req.params.id).get(), record.privateData) });
 });
 
 app.delete("/dealer/cars/:id", requireDealer, requireAccountActive, async (req, res) => {
