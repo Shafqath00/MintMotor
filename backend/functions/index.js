@@ -1444,7 +1444,8 @@ app.post("/dealer/cars/bulk", requireDealer, requireAccountActive, async (req, r
       batch.set(dealerPrivateRef(ref.id), { carId: ref.id, dealerId: req.dealer.id, ...result.privateData, createdAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp() });
     }
     if (valid.length) await batch.commit();
-    res.status(valid.length ? 201 : 400).json({
+    // Row-level problems are results, not a failed request, so the dealer can fix and resubmit those rows.
+    res.status(valid.length ? 201 : 200).json({
       created: valid.length,
       results: results.map((result) => result.id ? { row: result.row, id: result.id } : { row: result.row, errors: result.errors }),
     });

@@ -115,6 +115,6 @@ test('dealer bulk upload creates valid draft rows and reports the rest',async()=
   assert.equal(car.dealerId,'dealer');assert.equal(car.status,'draft');assert.equal(car.sellerType,'dealer');assert.equal(car.visibility,'public');
   assert.equal((await db.collection('dealerCarPrivate').doc(res.body.results[0].id).get()).data().tradePrice,8000);
   const again=await request(app).post('/dealer/cars/bulk').set('Authorization','Bearer dealer').send({rows:[rows[0]]});
-  assert.equal(again.status,400);assert.match(JSON.stringify(again.body),/already in your inventory/);
+  assert.equal(again.status,200);assert.equal(again.body.created,0);assert.match(JSON.stringify(again.body),/already in your inventory/);
   assert.equal((await request(app).post('/dealer/cars/bulk').set('Authorization','Bearer owner').send({rows})).status,403);
 });

@@ -73,8 +73,8 @@ function buildSellerCheckoutUrls({ frontendUrl, draftId }) {
   const successQuery = new URLSearchParams({ id: draftId, checkout: "success" });
   const cancelQuery = new URLSearchParams({ id: draftId, checkout: "cancelled" });
   return {
-    successUrl: `${frontendUrl}/sell/subscription?${successQuery.toString()}`,
-    cancelUrl: `${frontendUrl}/sell/subscription?${cancelQuery.toString()}`,
+    successUrl: `${frontendUrl}/seller/publish?${successQuery.toString()}`,
+    cancelUrl: `${frontendUrl}/seller/publish?${cancelQuery.toString()}`,
   };
 }
 

@@ -10,7 +10,10 @@ async function main(args = process.argv.slice(2)) {
     return;
   }
   if (args.some(arg => !['--apply', '--dry-run'].includes(arg)) || (args.includes('--apply') && args.includes('--dry-run'))) throw new Error('Use --apply OR --dry-run (default).');
-  const dryRun = !args.includes('--apply');
+  // Superseded on 2026-10-31: paid public seller adverts are kept (see docs/platform-split-rollout.md).
+  // Applying this would cancel every seller subscription and draft their adverts.
+  if (args.includes('--apply')) throw new Error('Seller plan retirement is cancelled. Paid public seller adverts are part of the platform; do not run --apply.');
+  const dryRun = true;
   const { admin, database, storage, storageStatusDatabase } = require('../functions/firebase');
   const key = process.env.STRIPE_SECRET_KEY_MINT || process.env.STRIPE_SECRET_KEY;
   if (!dryRun && !key) throw new Error('Set STRIPE_SECRET_KEY_MINT (or STRIPE_SECRET_KEY) before --apply.');

@@ -95,8 +95,8 @@ test("ends dealer visibility only for active dealer-owned stock", async () => {
 
 test("returns paid checkout to the same draft without claiming it was published", () => {
   assert.deepEqual(buildSellerCheckoutUrls({ frontendUrl: "https://mintmotor.co.uk", draftId: "draft-42" }), {
-    successUrl: "https://mintmotor.co.uk/sell/subscription?id=draft-42&checkout=success",
-    cancelUrl: "https://mintmotor.co.uk/sell/subscription?id=draft-42&checkout=cancelled",
+    successUrl: "https://mintmotor.co.uk/seller/publish?id=draft-42&checkout=success",
+    cancelUrl: "https://mintmotor.co.uk/seller/publish?id=draft-42&checkout=cancelled",
   });
 });
 
