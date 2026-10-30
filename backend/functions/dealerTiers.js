@@ -13,8 +13,79 @@ const DEALER_TIERS = Object.freeze({
   custom_500_plus: { name: "500+", monthlyPricePence: 500000, activeLimit: null, featuredLimit: null, priceEnvKey: "", selfService: false },
 });
 
-function publicDealerTiers() {
-  return Object.entries(DEALER_TIERS).map(([key, tier]) => ({ key, name: tier.name, monthlyPricePence: tier.monthlyPricePence, activeLimit: tier.activeLimit, featuredLimit: tier.featuredLimit, selfService: tier.selfService }));
+const PLAN_CONFIG = { collection: "platformConfig", id: "dealerPlans" };
+const CACHE_MS = 15_000;
+let cache = { at: 0, tiers: null };
+
+function mergeTiers(base, overrides = {}) {
+  const merged = {};
+  for (const [key, tier] of Object.entries(base)) {
+    const o = overrides[key] || {};
+    merged[key] = {
+      ...tier,
+      ...(typeof o.name === "string" && o.name ? { name: o.name } : {}),
+      ...(Number.isInteger(o.activeLimit) ? { activeLimit: o.activeLimit } : {}),
+      ...(Number.isInteger(o.featuredLimit) ? { featuredLimit: o.featuredLimit } : {}),
+      ...(Number.isInteger(o.monthlyPricePence) && typeof o.priceId === "string" && o.priceId ? { monthlyPricePence: o.monthlyPricePence, priceId: o.priceId } : {}),
+      offered: o.offered !== false,
+    };
+  }
+  return merged;
 }
 
-module.exports = { DEALER_TIERS, publicDealerTiers };
+// The code defaults with the admin's saved changes applied. Cached briefly so billing paths stay fast.
+async function getEffectiveTiers(database, { now = Date.now(), base = DEALER_TIERS } = {}) {
+  if (cache.tiers && now - cache.at < CACHE_MS && base === DEALER_TIERS) return cache.tiers;
+  let overrides = {};
+  try {
+    const snapshot = await database.collection(PLAN_CONFIG.collection).doc(PLAN_CONFIG.id).get();
+    overrides = snapshot.exists ? snapshot.data().overrides || {} : {};
+  } catch { /* Fall back to the defaults if the config can't be read. */ }
+  const tiers = mergeTiers(base, overrides);
+  if (base === DEALER_TIERS) cache = { at: now, tiers };
+  return tiers;
+}
+const invalidateTierCache = () => { cache = { at: 0, tiers: null }; };
+
+function publicDealerTiers(tiers = DEALER_TIERS) {
+  return Object.entries(tiers).filter(([, tier]) => tier.offered !== false)
+    .map(([key, tier]) => ({ key, name: tier.name, monthlyPricePence: tier.monthlyPricePence, activeLimit: tier.activeLimit, featuredLimit: tier.featuredLimit, selfService: tier.selfService }));
+}
+
+const PRICE_ID = /^price_[A-Za-z0-9]{6,80}$/;
+
+function validatePlanUpdate(key, body = {}, tiers = DEALER_TIERS) {
+  const errors = [];
+  const patch = {};
+  const current = tiers[key];
+  if (!current) return { patch, errors: ["Unknown plan."] };
+  if (body.name !== undefined) {
+    const name = String(body.name).trim();
+    if (!name || name.length > 30) errors.push("Plan name must be 1 to 30 characters.");
+    else patch.name = name;
+  }
+  if (body.activeLimit !== undefined) {
+    if (!Number.isInteger(body.activeLimit) || body.activeLimit < 1 || body.activeLimit > 10_000) errors.push("Live listing limit must be a whole number from 1 to 10,000.");
+    else patch.activeLimit = body.activeLimit;
+  }
+  if (body.featuredLimit !== undefined) {
+    if (!Number.isInteger(body.featuredLimit) || body.featuredLimit < 0 || body.featuredLimit > 10_000) errors.push("Featured limit must be a whole number from 0 to 10,000.");
+    else patch.featuredLimit = body.featuredLimit;
+  }
+  const active = patch.activeLimit ?? current.activeLimit;
+  const featured = patch.featuredLimit ?? current.featuredLimit;
+  if (Number.isInteger(active) && Number.isInteger(featured) && featured > active) errors.push("Featured listings can't exceed live listings.");
+  if (body.offered !== undefined) {
+    if (typeof body.offered !== "boolean") errors.push("Offered must be true or false.");
+    else patch.offered = body.offered;
+  }
+  if (body.priceId !== undefined || body.monthlyPricePence !== undefined) {
+    if (!PRICE_ID.test(String(body.priceId || ""))) errors.push("Enter the Stripe price ID for the new price (it starts with price_).");
+    else if (!Number.isInteger(body.monthlyPricePence) || body.monthlyPricePence < 100 || body.monthlyPricePence > 10_000_000) errors.push("Enter the new monthly price in pence.");
+    else { patch.priceId = body.priceId; patch.monthlyPricePence = body.monthlyPricePence; }
+  }
+  if (!errors.length && !Object.keys(patch).length) errors.push("Nothing to change.");
+  return { patch, errors };
+}
+
+module.exports = { DEALER_TIERS, PLAN_CONFIG, mergeTiers, getEffectiveTiers, invalidateTierCache, publicDealerTiers, validatePlanUpdate };

@@ -387,6 +387,7 @@ async function applyDealerSubscriptionLifecycle({ database, dealerId, subscripti
     stripeDealerCustomerId: typeof subscription.customer === "string" ? subscription.customer : subscription.customer?.id || "",
     stripeDealerSubscriptionId: subscription.id,
     dealerSubscriptionStatus: subscription.status,
+    dealerSubscriptionCancelAtPeriodEnd: subscription.cancel_at_period_end === true,
     dealerTierKey: tier.key,
     dealerActiveListingLimit: tier.activeLimit,
     dealerFeaturedListingLimit: tier.featuredLimit,

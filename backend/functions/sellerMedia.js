@@ -92,7 +92,7 @@ function createSellerMediaRouter({ admin, database, storage, storageStatusDataba
       ]);
       if (!callerActive || !ownerActive) return res.status(403).json({ error: "Account access is not active." });
       if (!publiclyVisible && !isOwner && user.role !== "admin") {
-        if (user.role !== "dealer" || user.email_verified !== true || car.sellerType !== "private" || car.listingPlan !== "dealer-network-free" || car.visibility !== "dealer-network" || car.status !== "published") return res.status(403).json({ error: "Approved dealer access is required." });
+        if (user.role !== "dealer" || user.email_verified !== true || car.sellerType !== "private" || car.listingPlan !== "dealer-network-free" || car.visibility !== "dealer-network" || car.status !== "published" || car.moderationStatus === "hidden" || car.moderationStatus === "rejected") return res.status(403).json({ error: "Approved dealer access is required." });
         const dealer = await getRecord(database, "dealers", user.uid);
         const mirror = storageStatusDatabase ? await getRecord(storageStatusDatabase, "storageDealerStatus", user.uid) : null;
         if (dealer?.dealerStatus !== "approved" || (storageStatusDatabase && mirror?.dealerStatus !== "approved")) return res.status(403).json({ error: "Dealer access is not active." });

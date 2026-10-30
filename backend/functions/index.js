@@ -45,7 +45,12 @@ const { publicCar, safeVehicleLookup } = require("./publicCar");
 const { EnquiryEmailDeliveryError, sendEnquiryEmail } = require("./enquiryEmail");
 const { DEFAULT_OWNER_ID: SCS_OWNER_ID, syncScsStock } = require("./scsImporter");
 const { updateScsStockStatus } = require("./scsStockAdmin");
-const { DEALER_TIERS, publicDealerTiers } = require("./dealerTiers");
+const { DEALER_TIERS, publicDealerTiers, getEffectiveTiers } = require("./dealerTiers");
+const { createAdminAuth } = require("./adminRoles");
+const { createAuditLog, actorFromRequest } = require("./adminAudit");
+const { createAdminRouter, createPublicHooks } = require("./adminRoutes");
+const { recordInvoiceEvent, recordRefund } = require("./adminPayments");
+const { isModeratedOut, setOwnerSuspensionHide } = require("./adminModeration");
 const { LEGAL_POLICY_VERSION, buildSubscriptionAcceptance, validateSubscriptionAcknowledgement } = require("./legal");
 const { buildSellerCheckoutUrls, createCustomerPortalSession, unpublishPublicListingsAfterAccessEnds, validateRecurringPrice } = require("./billing");
 const { applyDealerSubscriptionLifecycle, cancelDeletedAccountSubscription, processDueAccountDeletions } = require("./accountLifecycle");
@@ -210,39 +215,13 @@ function rejectDealerAccount(req, res, next) {
   next();
 }
 
-async function requireAdmin(req, res, next) {
-  const header = req.get("authorization") || "";
-  const token = header.startsWith("Bearer ") ? header.slice(7) : "";
-
-  if (!token) {
-    res.status(401).json({ error: "Authentication is required." });
-    return;
-  }
-
-  try {
-    req.user = await admin.auth().verifyIdToken(token);
-    const hasAdminClaim = req.user.admin === true || req.user.role === USER_ROLES.ADMIN;
-
-    if (hasAdminClaim) {
-      next();
-      return;
-    }
-
-    const profile = await database.collection("users").doc(req.user.uid).get();
-    const profileData = profile.exists ? profile.data() : {};
-    const hasAdminProfile = profileData?.role === USER_ROLES.ADMIN || profileData?.isAdmin === true;
-
-    if (!hasAdminProfile) {
-      res.status(403).json({ error: "Admin access is required." });
-      return;
-    }
-
-    next();
-  } catch (error) {
-    logger.warn("Admin verification failed", error);
-    res.status(401).json({ error: "Invalid authentication token." });
-  }
-}
+// Admin roles, per-route permissions and confirmation for critical actions live in adminRoles.js.
+const adminAuth = createAdminAuth({ admin, database, logger });
+const { requirePermission, requireConfirmation } = adminAuth;
+const audit = createAuditLog({ database, FieldValue, logger });
+const auditReq = (req, entry) => audit.record({ actor: actorFromRequest(req), ...entry });
+const carTitle = (car = {}) => [car.year, car.make, car.model].filter(Boolean).join(" ") || "Vehicle";
+const auditListing = (req, action, summary, id, car, details = {}) => auditReq(req, { action, category: "listing", target: { type: "listing", id, label: carTitle(car) }, summary, details: { ownerId: car?.ownerId || car?.dealerId || "", ...details } });
 
 function serializeDate(value) {
   return value?.toDate?.().toISOString?.() || value || null;
@@ -452,6 +431,7 @@ async function ensureUserProfile(user, payload = {}) {
   }
 
   await userRef.set(profile, { merge: true });
+  if (!snapshot.exists) await audit.record({ action: "account.register", category: "account", actor: { type: "user", uid: user.uid, email: profile.email }, target: { type: "user", id: user.uid, label: profile.email || user.uid }, summary: "New account registered" });
   return profile;
 }
 
@@ -549,6 +529,7 @@ async function updateSubscriptionFromStripe(subscription, userIdFromMetadata = "
   }
 
   if (!uid) return;
+  const previousProfile = await getUserProfile(uid);
   if (await cancelDeletedAccountSubscription({ database, uid, subscription, stripe, timestamp: FieldValue.serverTimestamp(), role: "seller" })) {
     logger.info("Ignored Stripe subscription event for a deleted seller account", { uid, subscriptionId: subscription.id });
     return;
@@ -571,6 +552,9 @@ async function updateSubscriptionFromStripe(subscription, userIdFromMetadata = "
     subscriptionCurrentPeriodEnd: periodEndSeconds ? Timestamp.fromMillis(periodEndSeconds * 1000) : null,
   })) {
     await unpublishPublicListingsAfterAccessEnds({ database, userId: uid, timestamp: FieldValue.serverTimestamp(), onUnpublished: syncSellerStorageStatus });
+  }
+  if (previousProfile.subscriptionStatus !== subscription.status) {
+    await audit.record({ action: "subscription.update", category: "subscription", actor: { type: "system" }, target: { type: "user", id: uid, label: previousProfile.email || uid }, summary: `${previousProfile.email || "A seller"}'s seller subscription is now ${subscription.status}`, details: { ownerId: uid, before: { status: previousProfile.subscriptionStatus || "none" }, after: { status: subscription.status } } });
   }
 }
 
@@ -616,8 +600,9 @@ async function notifyDealerPlanActivated(dealerId, subscription, tier) {
 async function updateDealerSubscriptionFromStripe(subscription, dealerIdFromMetadata = "", stripe, tierKeyFromMetadata = "") {
   const dealerId = dealerIdFromMetadata || subscription.metadata?.firebaseUid || "";
   const tierKey = subscription.metadata?.dealerTierKey || tierKeyFromMetadata;
-  const tier = DEALER_TIERS[tierKey];
+  const tier = (await getEffectiveTiers(database))[tierKey];
   if (!dealerId || !tier) return;
+  const previousDealer = (await database.collection("dealers").doc(dealerId).get()).data() || {};
   if (await cancelDeletedAccountSubscription({ database, uid: dealerId, subscription, stripe, timestamp: FieldValue.serverTimestamp(), role: "dealer" })) {
     logger.info("Ignored Stripe subscription event for a deleted dealer account", { uid: dealerId, subscriptionId: subscription.id });
     return;
@@ -629,7 +614,19 @@ async function updateDealerSubscriptionFromStripe(subscription, dealerIdFromMeta
     tier: { key: tierKey, ...tier },
     timestamp: FieldValue.serverTimestamp(),
   });
+  if (previousDealer.dealerSubscriptionStatus !== subscription.status || previousDealer.dealerTierKey !== tierKey) {
+    await audit.record({ action: "subscription.update", category: "subscription", actor: { type: "system" }, target: { type: "dealer", id: dealerId, label: previousDealer.businessName || dealerId }, summary: `${previousDealer.businessName || "A dealer"}'s ${tier.name} plan is now ${subscription.status}`, details: { ownerId: dealerId, before: { status: previousDealer.dealerSubscriptionStatus || "none", plan: previousDealer.dealerTierKey || "" }, after: { status: subscription.status, plan: tierKey } } });
+  }
   await notifyDealerPlanActivated(dealerId, subscription, { key: tierKey, ...tier });
+}
+
+// Looks up who a Stripe customer is when an invoice carries no account metadata.
+async function resolvePaymentCustomer(customerId) {
+  const seller = await database.collection("users").where("stripeCustomerId", "==", customerId).limit(1).get();
+  if (seller.docs[0]) return { accountType: "seller", accountId: seller.docs[0].id, label: seller.docs[0].data().email || seller.docs[0].id };
+  const dealer = await database.collection("dealers").where("stripeDealerCustomerId", "==", customerId).limit(1).get();
+  if (dealer.docs[0]) return { accountType: "dealer", accountId: dealer.docs[0].id, label: dealer.docs[0].data().businessName || dealer.docs[0].id };
+  return null;
 }
 
 async function handleStripeEvent(event, stripe) {
@@ -640,6 +637,17 @@ async function handleStripeEvent(event, stripe) {
       if (session.metadata?.dealerTierKey) await updateDealerSubscriptionFromStripe(subscription, session.metadata?.firebaseUid || session.client_reference_id || "", stripe, session.metadata.dealerTierKey);
       else await updateSubscriptionFromStripe(subscription, session.metadata?.firebaseUid || session.client_reference_id || "", stripe);
     }
+    return;
+  }
+
+  if (event.type === "invoice.paid" || event.type === "invoice.payment_failed") {
+    const payment = await recordInvoiceEvent({ database, FieldValue, invoice: event.data.object, eventType: event.type, resolveCustomer: resolvePaymentCustomer });
+    if (payment) await audit.record({ action: payment.status === "failed" ? "payment.failed" : "payment.received", category: "payment", actor: { type: "system" }, target: { type: payment.accountType === "dealer" ? "dealer" : "user", id: payment.accountId, label: payment.accountLabel || payment.accountId }, summary: payment.status === "failed" ? `A payment failed for ${payment.accountLabel || "an account"}` : `Payment received from ${payment.accountLabel || "an account"}`, details: { ownerId: payment.accountId, invoice: payment.invoiceNumber, amountPence: payment.amountPaidPence || payment.amountDuePence, plan: payment.tierKey } });
+    return;
+  }
+
+  if (event.type === "charge.refunded") {
+    await recordRefund({ database, FieldValue, charge: event.data.object });
     return;
   }
 
@@ -838,6 +846,7 @@ app.post("/dealer-applications", async (req, res) => {
       transaction.create(lockRef, { email: application.email, applicationId: applicationRef.id, createdAt: FieldValue.serverTimestamp() });
       transaction.create(applicationRef, { ...application, status: DEALER_APPLICATION_STATUS.SUBMITTED, createdAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp() });
     });
+    await audit.record({ action: "dealer.application.submit", category: "dealer", actor: { type: "system" }, target: { type: "application", id: applicationRef.id, label: application.businessName }, summary: `${application.businessName} applied to join as a dealer`, details: { email: application.email, dealerType: application.dealerType } });
     return res.status(201).json({ application: serializeDealerApplication(await applicationRef.get()) });
   } catch (error) {
     logger.warn("Dealer application submission failed", error);
@@ -850,7 +859,7 @@ function serializeAdminDealerApplication(snapshot) {
   return { ...serializeDealerApplication(snapshot), reviewedAt: serializeDate(data.reviewedAt), reviewedBy: data.reviewedBy || "", decisionNote: data.decisionNote || "" };
 }
 
-app.get("/admin/dealer-applications", requireAdmin, async (_req, res) => {
+app.get("/admin/dealer-applications", requirePermission("dealers.read"), async (_req, res) => {
   try {
     const snapshot = await database.collection("dealerApplications").orderBy("createdAt", "desc").get();
     res.json({ applications: snapshot.docs.map(serializeAdminDealerApplication) });
@@ -860,7 +869,7 @@ app.get("/admin/dealer-applications", requireAdmin, async (_req, res) => {
   }
 });
 
-app.get("/admin/dealers", requireAdmin, async (_req, res) => {
+app.get("/admin/dealers", requirePermission("dealers.read"), async (_req, res) => {
   try {
     const [snapshot, cars] = await Promise.all([database.collection("dealers").orderBy("updatedAt", "desc").get(), database.collection("cars").get()]);
     const counts = new Map();
@@ -875,7 +884,7 @@ app.get("/admin/dealers", requireAdmin, async (_req, res) => {
   }
 });
 
-app.get("/admin/dealers/:uid/cars", requireAdmin, async (req, res) => {
+app.get("/admin/dealers/:uid/cars", requirePermission("dealers.read"), async (req, res) => {
   try {
     const dealer = await database.collection("dealers").doc(req.params.uid).get();
     if (!dealer.exists) return res.status(404).json({ error: "Dealer not found." });
@@ -891,7 +900,7 @@ app.get("/admin/dealers/:uid/cars", requireAdmin, async (req, res) => {
   }
 });
 
-app.get("/admin/dealers/:uid", requireAdmin, async (req, res) => {
+app.get("/admin/dealers/:uid", requirePermission("dealers.read"), async (req, res) => {
   try {
     const snapshot = await database.collection("dealers").doc(req.params.uid).get();
     if (!snapshot.exists) return res.status(404).json({ error: "Dealer not found." });
@@ -907,13 +916,13 @@ app.get("/admin/dealers/:uid", requireAdmin, async (req, res) => {
   }
 });
 
-app.get("/admin/dealer-applications/:id", requireAdmin, async (req, res) => {
+app.get("/admin/dealer-applications/:id", requirePermission("dealers.read"), async (req, res) => {
   const snapshot = await database.collection("dealerApplications").doc(req.params.id).get();
   if (!snapshot.exists) return res.status(404).json({ error: "Dealer application not found." });
   return res.json({ application: { ...serializeDealerApplication(snapshot), decisionNote: snapshot.data().decisionNote || "" } });
 });
 
-app.patch("/admin/dealer-applications/:id", requireAdmin, async (req, res) => {
+app.patch("/admin/dealer-applications/:id", requirePermission("dealers.manage"), async (req, res) => {
   try {
     const ref = database.collection("dealerApplications").doc(req.params.id);
     const snapshot = await ref.get();
@@ -931,6 +940,7 @@ app.patch("/admin/dealer-applications/:id", requireAdmin, async (req, res) => {
     } else {
       await ref.update(patch);
     }
+    await auditReq(req, { action: `dealer.application.${status}`, category: "dealer", target: { type: "application", id: req.params.id, label: current.businessName || current.email }, summary: `Marked ${current.businessName || "an"} application as ${status.replace("_", " ")}`, details: { before: current.status, after: status, note: patch.decisionNote } });
     res.json({ application: serializeDealerApplication(await ref.get()) });
   } catch (error) {
     logger.error("Failed to update dealer application", error);
@@ -938,9 +948,10 @@ app.patch("/admin/dealer-applications/:id", requireAdmin, async (req, res) => {
   }
 });
 
-app.post("/admin/dealer-applications/:id/approve", requireAdmin, async (req, res) => {
+app.post("/admin/dealer-applications/:id/approve", requirePermission("dealers.manage"), async (req, res) => {
   try {
-      const dealer = await approveDealer({ applicationId: req.params.id, adminUid: req.user.uid });
+    const dealer = await approveDealer({ applicationId: req.params.id, adminUid: req.user.uid });
+    await auditReq(req, { action: "dealer.approve", category: "dealer", target: { type: "dealer", id: dealer.authUid || req.params.id, label: dealer.businessName }, summary: `Approved ${dealer.businessName || "a dealer"}`, details: { applicationId: req.params.id } });
     res.json({ dealer: serializeAdminDealer(dealer) });
   } catch (error) {
     logger.error("Failed to approve dealer", error);
@@ -948,9 +959,11 @@ app.post("/admin/dealer-applications/:id/approve", requireAdmin, async (req, res
   }
 });
 
-app.post("/admin/dealers/:uid/resend-activation", requireAdmin, async (req, res) => {
+app.post("/admin/dealers/:uid/resend-activation", requirePermission("dealers.manage"), async (req, res) => {
   try {
-    res.json({ dealer: serializeAdminDealer(await resendDealerActivation(req.params.uid)) });
+    const resent = await resendDealerActivation(req.params.uid);
+    await auditReq(req, { action: "dealer.resend_activation", category: "dealer", target: { type: "dealer", id: req.params.uid, label: resent.businessName }, summary: `Resent the activation email to ${resent.businessName || "a dealer"}` });
+    res.json({ dealer: serializeAdminDealer(resent) });
   } catch (error) {
     res.status(error.statusCode || 500).json({ error: error.message || "Unable to resend activation email." });
   }
@@ -971,10 +984,14 @@ async function updateDealerStatus(req, res, dealerStatus) {
     await ref.set(patch, { merge: true });
     await mirrorRef.set({ dealerStatus, updatedAt: FieldValue.serverTimestamp() }, { merge: true });
   }
+  // Suspended dealers' cars leave both sites right away, and return when the dealer is reactivated.
+  const affected = await setOwnerSuspensionHide({ database, FieldValue, ownerField: "dealerId", ownerId: req.params.uid, actorUid: req.user.uid, hide: dealerStatus === DEALER_STATUS.SUSPENDED });
+  const current = snapshot.data();
+  await auditReq(req, { action: dealerStatus === DEALER_STATUS.SUSPENDED ? "dealer.suspend" : "dealer.reactivate", category: "dealer", target: { type: "dealer", id: req.params.uid, label: current.businessName }, summary: dealerStatus === DEALER_STATUS.SUSPENDED ? `Suspended ${current.businessName || "a dealer"}` : `Reactivated ${current.businessName || "a dealer"}`, details: { before: current.dealerStatus, after: dealerStatus, listingsAffected: affected } });
   return res.json({ dealer: serializeAdminDealer(await ref.get()) });
 }
-app.post("/admin/dealers/:uid/suspend", requireAdmin, (req, res) => updateDealerStatus(req, res, DEALER_STATUS.SUSPENDED));
-app.post("/admin/dealers/:uid/reactivate", requireAdmin, (req, res) => updateDealerStatus(req, res, DEALER_STATUS.APPROVED));
+app.post("/admin/dealers/:uid/suspend", requirePermission("dealers.manage"), requireConfirmation, (req, res) => updateDealerStatus(req, res, DEALER_STATUS.SUSPENDED));
+app.post("/admin/dealers/:uid/reactivate", requirePermission("dealers.manage"), (req, res) => updateDealerStatus(req, res, DEALER_STATUS.APPROVED));
 
 app.get("/dealer/me", requireDealer, async (req, res) => {
   const user = await admin.auth().getUser(req.dealer.id);
@@ -982,17 +999,17 @@ app.get("/dealer/me", requireDealer, async (req, res) => {
 });
 
 // Marketing data for the signed-out Dealer site: plan names, prices and limits only.
-app.get("/dealer-plans", (_req, res) => {
-  res.json({ tiers: publicDealerTiers() });
+app.get("/dealer-plans", async (_req, res) => {
+  res.json({ tiers: publicDealerTiers(await getEffectiveTiers(database)) });
 });
 
-app.get("/dealer/tiers", requireDealer, (_req, res) => {
-  res.json({ tiers: publicDealerTiers() });
+app.get("/dealer/tiers", requireDealer, async (_req, res) => {
+  res.json({ tiers: publicDealerTiers(await getEffectiveTiers(database)) });
 });
 
 app.get("/dealer/subscription", requireDealer, async (req, res) => {
   const dealer = req.dealer || {};
-  const tier = DEALER_TIERS[dealer.dealerTierKey] || null;
+  const tier = (await getEffectiveTiers(database))[dealer.dealerTierKey] || null;
   res.json({ subscription: {
     status: dealer.dealerSubscriptionStatus || "inactive",
     tierKey: dealer.dealerTierKey || "",
@@ -1051,10 +1068,11 @@ app.post("/dealer/billing/checkout-session", requireDealer, requireAccountActive
   if (acknowledgement.errors) return res.status(400).json({ errors: acknowledgement.errors });
   const stripe = getStripeClient();
   const tierKey = String(req.body?.tierKey || "");
-  const tier = DEALER_TIERS[tierKey];
-  const priceId = tier?.priceEnvKey ? process.env[tier.priceEnvKey] : "";
+  const tier = (await getEffectiveTiers(database))[tierKey];
+  const priceId = tier?.priceId || (tier?.priceEnvKey ? process.env[tier.priceEnvKey] : "");
   if (!stripe) return res.status(503).json({ error: "Dealer billing is not configured." });
   if (!tier || !tier.selfService) return res.status(400).json({ error: "This dealer tier is available through the Mint Motor sales team." });
+  if (tier.offered === false) return res.status(400).json({ error: "This plan is not currently available." });
   if (!priceId) return res.status(503).json({ error: "This dealer tier is not configured for checkout yet." });
   try {
     await validateRecurringPrice({ stripe, priceId, expectedAmount: tier.monthlyPricePence });
@@ -1162,6 +1180,7 @@ app.post("/cars", requireAuth, rejectDealerAccount, requireAccountActive, async 
 
     const snapshot = await docRef.get();
     await syncSellerStorageStatus(docRef.id, snapshot.data());
+    await auditListing(req, "listing.create", "Started a listing", docRef.id, snapshot.data(), { plan: snapshot.data().listingPlan });
     res.status(201).json({ car: serializeCar(snapshot) });
   } catch (error) {
     logger.error("Failed to create car", error);
@@ -1234,6 +1253,8 @@ app.patch("/cars/:id", requireAuth, rejectDealerAccount, requireAccountActive, a
 
     const updated = await docRef.get();
     await syncSellerStorageStatus(req.params.id, updated.data());
+    const changedFields = Object.keys(historyUpdate.listing || {}).filter((key) => JSON.stringify(current[key]) !== JSON.stringify(updated.data()[key])).slice(0, 12);
+    await auditListing(req, planChanged ? "listing.plan_change" : "listing.update", planChanged ? "Changed how a listing is advertised" : "Edited a listing", req.params.id, updated.data(), { fields: changedFields, ...(planChanged ? { before: current.listingPlan, after: planPatch.listingPlan } : {}) });
     res.json({ car: serializeCar(updated) });
   } catch (error) {
     logger.error("Failed to update car", error);
@@ -1266,6 +1287,7 @@ app.patch("/cars/:id/status", requireAuth, rejectDealerAccount, requireAccountAc
     }
     await syncSellerStorageStatus(req.params.id, { ...current, status });
     await docRef.set({ status, updatedAt: FieldValue.serverTimestamp() }, { merge: true });
+    await auditListing(req, status === LISTING_STATUS.SOLD ? "listing.sold" : "listing.withdraw", status === LISTING_STATUS.SOLD ? "Marked a listing as sold" : "Withdrew a listing", req.params.id, current, { before: current.status, after: status });
     res.json({ car: serializeCar(await docRef.get()) });
   } catch (error) {
     logger.error("Failed to update listing status", error);
@@ -1289,6 +1311,7 @@ app.post("/cars/:id/publish", requireAuth, rejectDealerAccount, requireAccountAc
       return;
     }
     if (isDealerOwnedCar(car)) return res.status(403).json({ error: "Publish Dealer Network vehicles from your dealer inventory." });
+    if (car.moderationStatus === "rejected") return res.status(403).json({ error: "This listing was rejected by the Mint Motor team and can't be published.", reason: car.moderationReason || "" });
 
     const errors = validatePublishListing(car);
     if (car.listingPlan === "dealer-network-free") {
@@ -1334,6 +1357,7 @@ app.post("/cars/:id/publish", requireAuth, rejectDealerAccount, requireAccountAc
 
     const updated = await docRef.get();
     await syncSellerStorageStatus(req.params.id, updated.data());
+    await auditListing(req, "listing.publish", "Published a listing", req.params.id, updated.data(), { plan: car.listingPlan });
     res.json({ car: serializeCar(updated) });
   } catch (error) {
     logger.error("Failed to publish car", error);
@@ -1359,6 +1383,7 @@ app.delete("/cars/:id", requireAuth, rejectDealerAccount, requireAccountActive, 
 
     await syncSellerStorageStatus(req.params.id, { ...snapshot.data(), status: "deleted" }, false);
     await docRef.delete();
+    await auditListing(req, "listing.delete", "Deleted a listing", req.params.id, snapshot.data(), { status: snapshot.data().status });
     res.status(204).send("");
   } catch (error) {
     logger.error("Failed to delete car", error);
@@ -1422,6 +1447,7 @@ app.post("/dealer/cars", requireDealer, requireAccountActive, async (req, res) =
       });
       transaction.set(dealerPrivateRef(ref.id), { carId: ref.id, dealerId: req.dealer.id, ...privateData, createdAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp() });
     });
+    await auditListing(req, "listing.create", "Added a car to stock", ref.id, { ...listing, dealerId: req.dealer.id });
     res.status(201).json({ car: serializeDealerCar(await ref.get(), privateData) });
   } catch (error) {
     logger.error("Failed to create dealer listing", error);
@@ -1456,6 +1482,7 @@ app.post("/dealer/cars/bulk", requireDealer, requireAccountActive, async (req, r
       batch.set(dealerPrivateRef(ref.id), { carId: ref.id, dealerId: req.dealer.id, ...result.privateData, createdAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp() });
     }
     if (valid.length) await batch.commit();
+    if (valid.length) await auditReq(req, { action: "listing.bulk_create", category: "listing", target: { type: "dealer", id: req.dealer.id, label: req.dealer.businessName || "Dealer stock" }, summary: `Bulk added ${valid.length} cars`, details: { ownerId: req.dealer.id, created: valid.length, rejectedRows: results.length - valid.length } });
     // Row-level problems are results, not a failed request, so the dealer can fix and resubmit those rows.
     res.status(valid.length ? 201 : 200).json({
       created: valid.length,
@@ -1515,6 +1542,7 @@ app.patch("/dealer/cars/:id", requireDealer, requireAccountActive, async (req, r
     if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
     throw error;
   }
+  await auditListing(req, "listing.update", "Edited a car", req.params.id, record.car, { fields: Object.keys(listing).filter((key) => JSON.stringify(record.car[key]) !== JSON.stringify(listing[key])).slice(0, 12) });
   res.json({ car: serializeDealerCar(await database.collection("cars").doc(req.params.id).get(), privateResult.privateData) });
 });
 
@@ -1526,6 +1554,7 @@ app.post("/dealer/cars/:id/status", requireDealer, requireAccountActive, async (
   if (!record) return res.status(404).json({ error: "Listing not found." });
   if (record.car.dealerId !== req.dealer.id) return res.status(403).json({ error: "You can only change your own listings." });
   await database.collection("cars").doc(req.params.id).set({ status, updatedAt: FieldValue.serverTimestamp() }, { merge: true });
+  await auditListing(req, status === DEALER_LISTING_STATUS.SOLD ? "listing.sold" : "listing.withdraw", status === DEALER_LISTING_STATUS.SOLD ? "Marked a car as sold" : "Withdrew a car", req.params.id, record.car, { before: record.car.status, after: status });
   res.json({ car: serializeDealerCar(await database.collection("cars").doc(req.params.id).get(), record.privateData) });
 });
 
@@ -1537,6 +1566,7 @@ app.delete("/dealer/cars/:id", requireDealer, requireAccountActive, async (req, 
     transaction.delete(database.collection("cars").doc(req.params.id));
     transaction.delete(dealerPrivateRef(req.params.id));
   });
+  await auditListing(req, "listing.delete", "Deleted a car", req.params.id, record.car, { status: record.car.status });
   res.status(204).send("");
 });
 
@@ -1544,6 +1574,7 @@ app.post("/dealer/cars/:id/publish", requireDealer, requireAccountActive, async 
   const record = await getDealerPrivateCar(req.params.id);
   if (!record) return res.status(404).json({ error: "Listing not found." });
   if (record.car.dealerId !== req.dealer.id) return res.status(403).json({ error: "You can only publish your own listings." });
+  if (record.car.moderationStatus === "rejected") return res.status(403).json({ error: "This listing was rejected by the Mint Motor team and can't be published.", reason: record.car.moderationReason || "" });
   if (!hasActiveDealerSubscription(req.dealer)) {
     return res.status(403).json({ error: "Choose an active Dealer Network plan before publishing listings." });
   }
@@ -1592,6 +1623,7 @@ app.post("/dealer/cars/:id/publish", requireDealer, requireAccountActive, async 
     if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
     throw error;
   }
+  await auditListing(req, "listing.publish", "Published a car to the Mint Motor website", req.params.id, record.car);
   res.json({ car: serializeDealerCar(await database.collection("cars").doc(req.params.id).get(), record.privateData) });
 });
 
@@ -1604,7 +1636,7 @@ app.get("/dealer/network/cars", requireDealer, async (req, res) => {
   const carsSnapshot = await database.collection("cars").where("visibility", "==", "dealer-network").get();
   const cars = carsSnapshot.docs.filter((doc) => {
     const car = doc.data();
-    return car.sellerType === "private" && car.listingPlan === "dealer-network-free" && car.status === LISTING_STATUS.PUBLISHED;
+    return car.sellerType === "private" && car.listingPlan === "dealer-network-free" && car.status === LISTING_STATUS.PUBLISHED && !isModeratedOut(car);
   }).map((doc) => {
     return dealerSubmission(serializeCar(doc));
   });
@@ -1613,7 +1645,7 @@ app.get("/dealer/network/cars", requireDealer, async (req, res) => {
 
 app.get("/dealer/network/cars/:id", requireDealer, async (req, res) => {
   const record = await getDealerPrivateCar(req.params.id);
-  if (!record || record.car.visibility !== "dealer-network" || record.car.status !== LISTING_STATUS.PUBLISHED || record.car.sellerType !== "private" || record.car.listingPlan !== "dealer-network-free") {
+  if (!record || record.car.visibility !== "dealer-network" || record.car.status !== LISTING_STATUS.PUBLISHED || record.car.sellerType !== "private" || record.car.listingPlan !== "dealer-network-free" || isModeratedOut(record.car)) {
     return res.status(404).json({ error: "Vehicle not found." });
   }
   res.json({ car: dealerSubmission({ id: req.params.id, ...record.car }), seller: null });
@@ -1621,7 +1653,7 @@ app.get("/dealer/network/cars/:id", requireDealer, async (req, res) => {
 
 app.post("/dealer/network/cars/:id/enquiries", requireDealer, requireAccountActive, async (req, res) => {
   const record = await getDealerPrivateCar(req.params.id);
-  if (!record || record.car.visibility !== "dealer-network" || record.car.status !== LISTING_STATUS.PUBLISHED || record.car.sellerType !== "private" || record.car.listingPlan !== "dealer-network-free") {
+  if (!record || record.car.visibility !== "dealer-network" || record.car.status !== LISTING_STATUS.PUBLISHED || record.car.sellerType !== "private" || record.car.listingPlan !== "dealer-network-free" || isModeratedOut(record.car)) {
     return res.status(404).json({ error: "Vehicle not found." });
   }
   const message = String(req.body?.message || "").trim();
@@ -1798,12 +1830,13 @@ app.get("/me/enquiries", requireAuth, rejectDealerAccount, async (req, res) => {
   }
 });
 
-app.post("/admin/import/scs", requireAdmin, async (req, res) => {
+app.post("/admin/import/scs", requirePermission("import.run"), async (req, res) => {
   try {
     const result = await syncScsStock({
       ownerId: SCS_OWNER_ID,
       downloadStockImages: req.body?.downloadImages !== false,
     });
+    await auditReq(req, { action: "import.scs", category: "settings", target: { type: "import", id: "scs", label: "SCS stock" }, summary: "Imported SCS stock", details: { downloadImages: req.body?.downloadImages !== false } });
     res.json({ ownerId: SCS_OWNER_ID, ...result });
   } catch (error) {
     logger.error("Failed to import SCS stock", error);
@@ -1811,7 +1844,7 @@ app.post("/admin/import/scs", requireAdmin, async (req, res) => {
   }
 });
 
-app.get("/admin/summary", requireAdmin, async (_req, res) => {
+app.get("/admin/summary", requirePermission("stats.read"), async (_req, res) => {
   try {
     const [carsSnapshot, enquiriesSnapshot, usersSnapshot] = await Promise.all([
       database.collection("cars").get(),
@@ -1849,7 +1882,7 @@ app.get("/admin/summary", requireAdmin, async (_req, res) => {
   }
 });
 
-app.get("/admin/cars", requireAdmin, async (req, res) => {
+app.get("/admin/cars", requirePermission("listings.read"), async (req, res) => {
   try {
     const snapshot = await database.collection("cars").get();
     const cars = applyAdminCarFilters(snapshot.docs.map(serializeCar), req.query);
@@ -1860,7 +1893,7 @@ app.get("/admin/cars", requireAdmin, async (req, res) => {
   }
 });
 
-app.patch("/admin/cars/scs-status", requireAdmin, async (req, res) => {
+app.patch("/admin/cars/scs-status", requirePermission("import.run"), async (req, res) => {
   const status = String(req.body?.status || "").trim().toLowerCase();
   if (![LISTING_STATUS.PUBLISHED, LISTING_STATUS.DRAFT].includes(status)) {
     res.status(400).json({ error: "SCS stock status must be published or draft." });
@@ -1873,6 +1906,7 @@ app.patch("/admin/cars/scs-status", requireAdmin, async (req, res) => {
       status,
       timestamp: FieldValue.serverTimestamp(),
     });
+    await auditReq(req, { action: "import.scs_status", category: "settings", target: { type: "import", id: "scs", label: "SCS stock" }, summary: `Set all SCS stock to ${status}`, details: { status } });
     res.json(result);
   } catch (error) {
     logger.error("Failed to update SCS stock status", error);
@@ -1880,7 +1914,7 @@ app.patch("/admin/cars/scs-status", requireAdmin, async (req, res) => {
   }
 });
 
-app.patch("/admin/cars/:id", requireAdmin, async (req, res) => {
+app.patch("/admin/cars/:id", requirePermission("listings.edit"), async (req, res) => {
   try {
     const { patch, errors } = validateAdminCarPayload(req.body);
     if (errors.length) {
@@ -1905,9 +1939,15 @@ app.patch("/admin/cars/:id", requireAdmin, async (req, res) => {
       update.publishedAt = FieldValue.serverTimestamp();
     }
 
+    const before = snapshot.data();
+    if (patch.isFeatured !== undefined && !req.adminPermissions.has("listings.feature")) return res.status(403).json({ code: "PERMISSION_DENIED", error: "Your role can't feature listings.", permission: "listings.feature" });
     await docRef.set(update, { merge: true });
 
     const updated = await docRef.get();
+    const label = [before.year, before.make, before.model].filter(Boolean).join(" ");
+    const changed = Object.keys(patch).filter((key) => before[key] !== patch[key]);
+    const action = patch.isFeatured !== undefined && patch.isFeatured !== (before.isFeatured === true) ? (patch.isFeatured ? "listing.feature" : "listing.unfeature") : "listing.admin_update";
+    if (changed.length) await auditReq(req, { action, category: "listing", target: { type: "listing", id: req.params.id, label }, summary: action === "listing.feature" ? "Featured a listing" : action === "listing.unfeature" ? "Removed a listing's featured status" : "Edited a listing", details: { ownerId: before.ownerId, before: Object.fromEntries(changed.map((key) => [key, before[key]])), after: Object.fromEntries(changed.map((key) => [key, patch[key]])) } });
     res.json({ car: serializeCar(updated) });
   } catch (error) {
     logger.error("Failed to update admin car", error);
@@ -1915,7 +1955,7 @@ app.patch("/admin/cars/:id", requireAdmin, async (req, res) => {
   }
 });
 
-app.delete("/admin/cars/:id", requireAdmin, async (req, res) => {
+app.delete("/admin/cars/:id", requirePermission("listings.delete"), requireConfirmation, async (req, res) => {
   try {
     const docRef = database.collection("cars").doc(req.params.id);
     const snapshot = await docRef.get();
@@ -1925,7 +1965,9 @@ app.delete("/admin/cars/:id", requireAdmin, async (req, res) => {
       return;
     }
 
+    const doomed = snapshot.data();
     await docRef.delete();
+    await auditReq(req, { action: "listing.delete", category: "listing", target: { type: "listing", id: req.params.id, label: [doomed.year, doomed.make, doomed.model].filter(Boolean).join(" ") }, summary: "Deleted a listing", details: { ownerId: doomed.ownerId, status: doomed.status } });
     res.status(204).send("");
   } catch (error) {
     logger.error("Failed to delete admin car", error);
@@ -1933,7 +1975,7 @@ app.delete("/admin/cars/:id", requireAdmin, async (req, res) => {
   }
 });
 
-app.get("/admin/enquiries", requireAdmin, async (req, res) => {
+app.get("/admin/enquiries", requirePermission("enquiries.manage"), async (req, res) => {
   try {
     const snapshot = await database.collection("enquiries").get();
     let enquiries = snapshot.docs.map(serializeEnquiry);
@@ -1950,7 +1992,7 @@ app.get("/admin/enquiries", requireAdmin, async (req, res) => {
   }
 });
 
-app.patch("/admin/enquiries/:id", requireAdmin, async (req, res) => {
+app.patch("/admin/enquiries/:id", requirePermission("enquiries.manage"), async (req, res) => {
   try {
     const { patch, errors } = validateAdminEnquiryPayload(req.body);
     if (errors.length) {
@@ -1972,6 +2014,7 @@ app.patch("/admin/enquiries/:id", requireAdmin, async (req, res) => {
     }, { merge: true });
 
     const updated = await docRef.get();
+    await auditReq(req, { action: "enquiry.update", category: "enquiry", target: { type: "enquiry", id: req.params.id, label: snapshot.data().carTitle || "Enquiry" }, summary: "Updated an enquiry", details: { before: snapshot.data().status, after: patch.status } });
     res.json({ enquiry: serializeEnquiry(updated) });
   } catch (error) {
     logger.error("Failed to update admin enquiry", error);
@@ -1979,10 +2022,14 @@ app.patch("/admin/enquiries/:id", requireAdmin, async (req, res) => {
   }
 });
 
-app.get("/admin/users", requireAdmin, async (req, res) => {
+app.get("/admin/users", requirePermission("users.read"), async (req, res) => {
   try {
-    const snapshot = await database.collection("users").get();
-    let users = snapshot.docs.map(serializeUser);
+    const [snapshot, carsSnapshot] = await Promise.all([database.collection("users").get(), database.collection("cars").get()]);
+    const listingCounts = new Map();
+    for (const car of carsSnapshot.docs) listingCounts.set(car.data().ownerId, (listingCounts.get(car.data().ownerId) || 0) + 1);
+    let users = snapshot.docs.map((doc) => ({ ...serializeUser(doc), status: doc.data().status || "active", adminVerified: doc.data().adminVerified === true, listingCount: listingCounts.get(doc.id) || 0 }));
+    if (req.query.status) users = users.filter((user) => user.status === req.query.status);
+    if (req.query.role) users = users.filter((user) => user.role === req.query.role);
     const text = String(req.query.q || req.query.search || "").trim().toLowerCase();
 
     if (text) {
@@ -2000,15 +2047,18 @@ app.get("/admin/users", requireAdmin, async (req, res) => {
   }
 });
 
-app.patch("/admin/users/:uid", requireAdmin, async (req, res) => {
+app.patch("/admin/users/:uid", requirePermission("users.manage"), async (req, res) => {
   try {
     const { patch, errors } = validateAdminUserPayload(req.body);
     if (errors.length) {
       res.status(400).json({ errors });
       return;
     }
+    // Roles are managed under Team, by owners only, so support staff can't promote anyone.
+    if (patch.role !== undefined && !req.adminPermissions.has("team.manage")) return res.status(403).json({ code: "PERMISSION_DENIED", error: "Only an owner can change account roles.", permission: "team.manage" });
 
     const userRef = database.collection("users").doc(req.params.uid);
+    const beforeUser = (await userRef.get()).data() || {};
     const update = {
       ...patch,
       uid: req.params.uid,
@@ -2031,6 +2081,7 @@ app.patch("/admin/users/:uid", requireAdmin, async (req, res) => {
     }
 
     const updated = await userRef.get();
+    await auditReq(req, { action: patch.role !== undefined && patch.role !== beforeUser.role ? "user.role_change" : "user.update", category: "account", target: { type: "user", id: req.params.uid, label: beforeUser.email || req.params.uid }, summary: patch.role !== undefined && patch.role !== beforeUser.role ? `Changed ${beforeUser.email || "an account"} to ${patch.role}` : "Edited an account", details: { before: Object.fromEntries(Object.keys(patch).map((key) => [key, beforeUser[key]])), after: patch } });
     res.json({ user: serializeUser(updated) });
   } catch (error) {
     logger.error("Failed to update admin user", error);
@@ -2048,18 +2099,25 @@ app.get("/platform-settings/homepage", async (req, res) => {
   }
 });
 
-app.put("/admin/platform-settings/homepage", requireAdmin, async (req, res) => {
+app.put("/admin/platform-settings/homepage", requirePermission("content.manage"), async (req, res) => {
   try {
     const patch = { ...req.body, updatedAt: FieldValue.serverTimestamp() };
     await database.collection("platform_settings").doc("homepage").set(patch, { merge: true });
     
     const updated = await database.collection("platform_settings").doc("homepage").get();
+    await auditReq(req, { action: "content.homepage_update", category: "content", target: { type: "settings", id: "homepage", label: "Homepage content" }, summary: "Updated the homepage content", details: { fields: Object.keys(req.body || {}) } });
     res.json(updated.exists ? updated.data() : {});
   } catch (error) {
     logger.error("Failed to update homepage settings", error);
     res.status(500).json({ error: "Unable to update homepage settings." });
   }
 });
+
+app.use("/admin", createAdminRouter({
+  database, admin, FieldValue, logger, auth: adminAuth, audit,
+  serializeCar, serializeUser, serializeEnquiry, getStripeClient, validateRecurringPrice,
+}));
+app.use(createPublicHooks({ database, FieldValue, logger, optionalAuth, requireDealer, isPublicMarketplaceCar, audit, crypto }));
 
 app.use((req, res) => {
   res.status(404).json({ error: `No route for ${req.method} ${req.path}` });

@@ -1,4 +1,5 @@
 const { sanitizeVehicleHistory } = require('./validators');
+const { isModeratedOut } = require('./adminModeration');
 
 // The server, never the client, decides who can see a private seller's advert.
 function sellerPlanPatch(listingPlan) {
@@ -16,6 +17,7 @@ function dateMillis(value) {
 }
 
 function isPublicMarketplaceCar(car = {}) {
+  if (isModeratedOut(car)) return false;
   if (car.visibility === 'dealer-network' || car.listingPlan === 'dealer-network-free') return false;
   // Dealer stock and paid public adverts alike. The billing webhooks draft them
   // when the owner's subscription lapses.

@@ -54,6 +54,13 @@ function createRequireAccountActive({ database, logger = console }) {
         res.status(410).json({ code: "ACCOUNT_DELETED", error: "This account has been deleted." });
         return;
       }
+      // Suspended by an admin: stop changes straight away, without waiting for the sign-in token to expire.
+      let suspended = false;
+      try { suspended = (await database.collection("users").doc(req.user.uid).get()).data()?.status === "suspended"; } catch { /* Not blocking on a failed lookup. */ }
+      if (suspended) {
+        res.status(403).json({ code: "ACCOUNT_SUSPENDED", error: "This account has been suspended. Contact Mint Motor support." });
+        return;
+      }
       next();
     } catch (error) {
       logger.error?.("Unable to check account deletion status", error);
