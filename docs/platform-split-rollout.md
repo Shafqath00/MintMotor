@@ -1,0 +1,38 @@
+# Seller and dealer platform split rollout
+
+New private seller adverts are free submissions visible only to approved Dealer Network accounts. Existing *published*, paid private public adverts retain their purchased public period; after that period they become drafts. Sharing a retired advert with dealers requires the seller to choose the free flow and explicitly publish again. No automatic sharing, new seller checkout, refund, or paid-period extension is part of this rollout. Dealer subscriptions and dealer stock remain separate.
+
+## Deployment sequence
+
+1. Back up the named `mintmotor` Firestore database and bucket. Deploy the backend guards which stop new seller checkout and prevent delayed seller Checkout/webhook events from publishing or extending adverts. Keep dealer webhook routing ahead of seller retirement handling.
+2. Preview from the repository root: `node backend/scripts/retire-seller-plans.js --dry-run`. This is the default with no flags. It reads Firestore only: **no Firestore writes, Stripe calls, Storage copies, token changes or deletes**. Candidate periods and image validity remain unverified in this preview.
+3. Review the candidate owner/subscription/listing IDs. Provide application-default Firebase credentials, the correct `GCLOUD_PROJECT`/bucket, and `STRIPE_SECRET_KEY_MINT` (or `STRIPE_SECRET_KEY`) in the operator environment. The script uses the existing Firebase module, including its named database configuration. It does not load local secret files or print keys.
+4. Apply once with `node backend/scripts/retire-seller-plans.js --apply`. Inspect the JSON report and require exit code zero. Re-run the same command to retry failures. Do not delete or edit the retirement manifest or evidence records.
+5. Enable the public-read policy and seller UI. Public reads must check the immutable per-listing `legacyPublicUntil` at request time. Scheduled expiry must draft expired adverts, protect their photos and synchronize the default-database storage mirror. A late scheduler must never prolong public access.
+6. Deploy Firestore/Storage rules and finish media protection before announcing that previously public seller photos are private. Check an unauthenticated legacy photo URL, a seller-owned photo, an approved dealer submission photo and an unrelated account. Previously downloaded/cached images cannot be recalled.
+
+## Durable records and retry behavior
+
+`platformMigrations/seller-plan-retirement-v1` is the immutable cutoff and listing-membership manifest. It includes only existing published private `public-subscription` / `public` adverts. Cars created or published after the manifest was captured cannot be added on reruns. Existing seller subscriptions without public adverts are still retired. The manifest is created atomically; a payload over 800 KB fails before any writes and requires an operator-reviewed partitioning implementation. Collection reads are paginated.
+
+`sellerPlanRetirementSubscriptions/{subscriptionId}` records frozen invoice evidence, the original cancellation configuration, listing IDs, completion state and the last error. Duplicate profile references are grouped. Dealer profiles and subscriptions with dealer metadata are excluded. Ownership mismatches fail closed for manual review. Unlinked paid public adverts receive no invented entitlement and are drafted. The migration does not discover subscriptions missing from every user profile; audit Stripe subscriptions separately, and keep late seller-event retirement handling enabled.
+
+The cutoff accepts only invoices actually paid on or before that cutoff, with positive payment and a matching, non-prorated recurring service line. The purchased end comes from that line's `period.end`, capped by the matching subscription-item boundary when available. Neither an `active` status, trial, profile entitlement, nor invoice-level `period_end` proves payment. A failed latest invoice can fall back to paginated earlier paid invoices. Unpaid/incomplete/trial/unrecognized records receive no new access without qualifying evidence. Stripe read failures remain retryable and do not produce a grant. Invoice evidence is persisted before renewal cancellation so a retry cannot adopt a newer paid period.
+
+Each snapshotted advert receives `legacySellerRetirementVersion`, `legacyStripeSubscriptionId`, and a once-only `legacyPublicUntil` (or null rejection). Current listing ownership/plan/status is rechecked transactionally, so converting to the free flow during a retry is preserved. These server-owned fields must be excluded from all client payloads and never updated by webhooks. Normal cancellation honors the frozen paid-through date, including when a customer cancels sooner. The migration saves the original cancellation configuration and preserves an already scheduled earlier cancellation. Otherwise it sets `cancel_at_period_end: true` with an idempotency key; it creates no refunds.
+
+## Photos and storage mirror
+
+The script immediately protects free dealer-only submissions and all other nonpublic private adverts. Valid grandfathered public adverts retain their public photos until withdrawal or expiry. Unsupported/foreign image URLs and missing/unsupported objects are reported as failures, never silently treated as private.
+
+`sellerPlanRetirementMedia/{carId}` retains the source/destination plan before changing a car's photos. Copies go to token-free private paths, the car is updated transactionally, and the default-database `storageSellerListings/{carId}` mirror is synchronized before original public tokens/objects are revoked. The persisted plan survives a crash between copying, saving and source revocation. Do not delete failed progress records: rerun to finish revocation. A concurrent photo edit fails for review instead of overwriting it.
+
+Mirror fields are `ownerId`, `sellerType`, `listingPlan`, `visibility`, `status`, `legacyPublicUntil`, and `accountActive`. Ongoing API changes and scheduler expiry must keep these aligned, including disabling access for deleted/suspended accounts. Audit the named listing database and default mirror together. The migration script can be rerun after expiry as a repair sweep; the regular scheduler must also handle that work.
+
+The deployable sweep is `protectExistingSellerMedia` from `backend/functions/sellerRetirementMedia.js`. On every scheduled run call `expireLegacySellerAdverts` first, then call this sweep with `{ database, storageStatusDatabase, bucket: storage.bucket(), dryRun: false, now }`. Run the media sweep even when zero adverts just expired: a prior invocation may have saved the draft/photo metadata but failed before source revocation. Inspect/raise its `errors` array so such failures remain visible. The expiry helper also accepts `onExpired({id, car})` for targeted mirror work, but a callback alone cannot retry an already-drafted record; retain the independent repair sweep.
+
+## Verification and rollback
+
+Run `node --test backend/functions/sellerRetirement.test.js backend/functions/sellerMedia.test.js` and the route/rules tests before deployment. Check exact expiry boundaries, a previously paid cancellation, delayed old seller events, free conversion during retry, duplicate profiles and unchanged dealer renewal behavior.
+
+Rollback the UI/backend behind its release flag only after reviewing data access. Do not resume retired subscriptions automatically, remove the manifest, extend frozen windows, restore revoked public tokens, or convert private submissions to public. Fix and retry individual error records while retaining the cutoff and paid evidence. No live migration has been executed as part of implementation.
