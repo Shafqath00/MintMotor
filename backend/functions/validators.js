@@ -13,6 +13,7 @@ const ENQUIRY_STATUS = {
 const USER_ROLES = {
   USER: "user",
   ADMIN: "admin",
+  DEALER: "dealer",
 };
 
 const FUEL_TYPES = ["Petrol", "Diesel", "Electric", "Hybrid"];
@@ -289,6 +290,7 @@ function validateListingPayload(payload = {}, options = {}) {
 
   const listing = {
     status: asString(payload.status).toLowerCase(),
+    listingPlan: asString(payload.listingPlan).toLowerCase(),
     registrationNumber: asString(payload.registrationNumber).toUpperCase(),
     make: asString(payload.make),
     model: asString(payload.model),
@@ -379,6 +381,12 @@ function validateListingPayload(payload = {}, options = {}) {
     if (!listing.location) errors.push("Location is required.");
   }
   if (
+    payload.listingPlan !== undefined &&
+    !["public-subscription", "dealer-network-free"].includes(listing.listingPlan)
+  ) {
+    errors.push("Listing plan is not supported.");
+  }
+  if (
     payload.sellerPostcode !== undefined &&
     listing.sellerPostcode &&
     !isValidUkPostcode(listing.sellerPostcode)
@@ -404,7 +412,9 @@ function validateListingPayload(payload = {}, options = {}) {
   }
 
   const cleanListing = Object.fromEntries(
-    Object.entries(listing).filter(([, value]) => value !== undefined),
+    Object.entries(listing).filter(([key, value]) =>
+      value !== undefined && (!allowPartial || payload[key] !== undefined),
+    ),
   );
   return { listing: cleanListing, errors };
 }

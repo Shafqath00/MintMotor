@@ -47,6 +47,13 @@ test("validateListingPayload preserves a seller opting out of MintMotor enquirie
   assert.equal(listing.allowEnquiries, false);
 });
 
+test("validateListingPayload partial updates include only explicitly supplied fields", () => {
+  const { errors, listing } = validateListingPayload({ images: ["dealer-photo.jpg"] }, { partial: true });
+
+  assert.deepEqual(errors, []);
+  assert.deepEqual(listing, { images: ["dealer-photo.jpg"] });
+});
+
 test("validateListingPayload rejects invalid public phone settings", () => {
   const { errors } = validateListingPayload({
     make: "BMW",
