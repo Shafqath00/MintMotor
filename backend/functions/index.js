@@ -2020,8 +2020,9 @@ exports.mintapi = onRequest({ region: "us-central1", timeoutSeconds: 540, memory
 exports.app = app;
 exports.sellerRetirementReconciliation = onSchedule({ schedule: "every 60 minutes", timeZone: "Etc/UTC", region: "us-central1", timeoutSeconds: 540, memory: "1GiB" }, async () => {
   if (!sellerSplitEnabled()) return;
-  await expireLegacySellerAdverts({ database, now: Date.now(), timestamp: FieldValue.serverTimestamp() });
-  const result = await protectExistingSellerMedia({ database, storageStatusDatabase, bucket: storage.bucket(), dryRun: false });
+  const now = Date.now();
+  await expireLegacySellerAdverts({ database, now, timestamp: FieldValue.serverTimestamp() });
+  const result = await protectExistingSellerMedia({ database, storageStatusDatabase, bucket: storage.bucket(), dryRun: false, now });
   if (result.errors.length) throw new Error(`${result.errors.length} private seller photo migrations need a retry.`);
 });
 exports.accountDeletionReconciliation = onSchedule({
