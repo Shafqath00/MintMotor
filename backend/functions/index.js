@@ -51,6 +51,7 @@ const { createAuditLog, actorFromRequest } = require("./adminAudit");
 const { createAdminRouter, createPublicHooks } = require("./adminRoutes");
 const { recordInvoiceEvent, recordRefund } = require("./adminPayments");
 const { isModeratedOut, setOwnerSuspensionHide } = require("./adminModeration");
+const { listingKind, LISTING_KIND_LABELS } = require("./adminStats");
 const { LEGAL_POLICY_VERSION, buildSubscriptionAcceptance, validateSubscriptionAcknowledgement } = require("./legal");
 const { buildSellerCheckoutUrls, createCustomerPortalSession, unpublishPublicListingsAfterAccessEnds, validateRecurringPrice } = require("./billing");
 const { applyDealerSubscriptionLifecycle, cancelDeletedAccountSubscription, processDueAccountDeletions } = require("./accountLifecycle");
@@ -385,29 +386,26 @@ function applyAdminCarFilters(cars, query) {
   let results = [...cars];
   const text = String(query.q || query.search || "").trim().toLowerCase();
 
-  if (query.status) {
-    results = results.filter((car) => car.status === query.status);
-  }
+  if (query.status) results = results.filter((car) => car.status === query.status);
+  if (query.kind) results = results.filter((car) => listingKind(car) === query.kind);
+  if (query.moderation) results = results.filter((car) => (car.moderationStatus || "ok") === query.moderation);
+  if (query.featured === "true") results = results.filter((car) => car.isFeatured === true);
+  if (query.owner) results = results.filter((car) => car.ownerId === query.owner || car.dealerId === query.owner);
+  if (query.minPrice) results = results.filter((car) => Number(car.price) >= Number(query.minPrice));
+  if (query.maxPrice) results = results.filter((car) => Number(car.price) <= Number(query.maxPrice));
+  if (query.from) results = results.filter((car) => toMillis(car.createdAt) >= Date.parse(query.from));
+  if (query.to) results = results.filter((car) => toMillis(car.createdAt) <= Date.parse(query.to) + 86_399_999);
 
   if (text) {
     results = results.filter((car) => {
-      const haystack = [
-        car.make,
-        car.model,
-        car.variant,
-        car.registrationNumber,
-        car.location,
-        car.ownerEmail,
-        car.contactEmail,
-        car.contactName,
-      ].join(" ").toLowerCase();
+      const haystack = [car.make, car.model, car.variant, car.registrationNumber, car.location, car.ownerEmail, car.contactEmail, car.contactName, car.ownerLabel].join(" ").toLowerCase();
       return haystack.includes(text);
     });
   }
 
   results.sort((a, b) => toMillis(b.updatedAt || b.createdAt) - toMillis(a.updatedAt || a.createdAt));
 
-  const limit = Math.min(Number(query.limit) || 100, 200);
+  const limit = Math.min(Number(query.limit) || 200, 500);
   return results.slice(0, limit);
 }
 
@@ -1884,9 +1882,11 @@ app.get("/admin/summary", requirePermission("stats.read"), async (_req, res) => 
 
 app.get("/admin/cars", requirePermission("listings.read"), async (req, res) => {
   try {
-    const snapshot = await database.collection("cars").get();
-    const cars = applyAdminCarFilters(snapshot.docs.map(serializeCar), req.query);
-    res.json({ cars });
+    const [snapshot, dealersSnapshot] = await Promise.all([database.collection("cars").get(), database.collection("dealers").get()]);
+    const dealerNames = new Map(dealersSnapshot.docs.map((doc) => [doc.id, doc.data().businessName]));
+    // Each car says which kind of listing it is and who owns it, so the console can tell the three apart at a glance.
+    const labelled = snapshot.docs.map(serializeCar).map((car) => ({ ...car, kind: listingKind(car), kindLabel: LISTING_KIND_LABELS[listingKind(car)], ownerLabel: car.dealerId ? dealerNames.get(car.dealerId) || "Dealer" : car.ownerEmail || car.contactName || "" }));
+    res.json({ cars: applyAdminCarFilters(labelled, req.query) });
   } catch (error) {
     logger.error("Failed to load admin cars", error);
     res.status(500).json({ error: "Unable to load admin listings." });

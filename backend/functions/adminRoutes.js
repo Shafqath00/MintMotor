@@ -21,7 +21,7 @@ function pageOf(rows, query, defaultSize = 25) {
 
 function createAdminRouter(deps) {
   const { database, admin, FieldValue, logger, auth, audit, serializeCar, serializeUser, serializeEnquiry, getStripeClient, validateRecurringPrice } = deps;
-  const { requirePermission, requireConfirmation } = auth;
+  const { requireAdmin, requirePermission, requireConfirmation } = auth;
   const router = express.Router();
   router.use(express.json({ limit: "100kb" }));
 
@@ -39,6 +39,11 @@ function createAdminRouter(deps) {
     const subscriptions = buildSubscriptions({ users, dealers, cars, tiers, now: Date.now() });
     return { cars, users, dealers, applications, enquiries, payments, reports, tiers, subscriptions };
   }
+
+  // Who am I, and what may I do? The console uses this to show only the sections this role can use.
+  router.get("/me", requireAdmin, (req, res) => {
+    res.json({ uid: req.user.uid, email: req.user.email || "", role: req.adminRole, roleLabel: ROLE_LABELS[req.adminRole], permissions: [...req.adminPermissions] });
+  });
 
   // ── Dashboard ──────────────────────────────────────────────────────────────
   router.get("/stats", requirePermission("stats.read"), async (req, res) => {

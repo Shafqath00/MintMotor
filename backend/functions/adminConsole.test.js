@@ -327,3 +327,33 @@ test("Stripe invoice events become payments once, and subscription changes are a
     assert.equal(change.details.after.status, "past_due");
   } finally { delete process.env.STRIPE_SECRET_KEY; delete process.env.STRIPE_WEBHOOK_SECRET; }
 });
+
+test("the console can ask who the admin is and what they may do", async () => {
+  const { as } = setup();
+  const boss = (await as("boss").get("/admin/me")).body;
+  assert.deepEqual([boss.role, boss.roleLabel], ["owner", "Owner"]);
+  assert.ok(boss.permissions.includes("team.manage"));
+  const fin = (await as("fin").get("/admin/me")).body;
+  assert.ok(fin.permissions.includes("payments.read") && !fin.permissions.includes("listings.moderate"));
+  assert.equal((await as("seller").get("/admin/me")).status, 403);
+});
+
+test("the listings list says which kind each car is, and filters by kind, owner, moderation, price and date", async () => {
+  const { as, confirm } = setup();
+  const all = await as("sup").get("/admin/cars");
+  assert.equal(all.status, 200);
+  const byId = Object.fromEntries(all.body.cars.map((c) => [c.id, c]));
+  assert.deepEqual([byId.pub.kindLabel, byId.free.kindLabel, byId.stock.kindLabel], ["Regular user listing", "Free dealer-only listing", "Paid dealer listing"]);
+  assert.equal(byId.stock.ownerLabel, "Mint Cars");
+  const ids = async (q) => (await as("sup").get("/admin/cars" + q)).body.cars.map((c) => c.id).sort();
+  assert.deepEqual(await ids("?kind=free-dealer-only"), ["free"]);
+  assert.deepEqual(await ids("?owner=dealer"), ["stock"]);
+  assert.deepEqual(await ids("?owner=seller"), ["free", "pub"]);
+  assert.deepEqual(await ids("?minPrice=10000&maxPrice=15000"), ["free"]);
+  assert.deepEqual(await ids("?q=mint%20cars"), ["stock"]);
+  assert.deepEqual(await ids("?from=" + new Date(NOW - 1.5 * DAY).toISOString().slice(0, 10)), ["pub"]);
+  await as("sup").post("/admin/cars/pub/moderate", { action: "hide", reason: "Spam content" }, confirm);
+  assert.deepEqual(await ids("?moderation=hidden"), ["pub"]);
+  assert.deepEqual(await ids("?moderation=ok"), ["free", "stock"]);
+  assert.equal((await as("fin").get("/admin/cars")).status, 403);
+});

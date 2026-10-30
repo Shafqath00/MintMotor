@@ -26,6 +26,21 @@ This replaces the 2026-10-30 plan to retire paid seller adverts. **Do not run th
 - The site is an installable web app (`dealer.webmanifest`, icons in `public/dealer-icons`), linked only on the dealer host. There is no native app in this repository.
 - New API: `GET /dealer-plans` (public, plan names, prices and limits only), `POST /dealer/cars/:id/status` (withdraw to draft or mark sold), and `/dealer/network/cars` now also filters by `model`, `minYear`, `maxYear`, `maxMileage` and sorts by `year-desc`.
 
+## Admin console
+
+`/admin` on the main site is a full console: Dashboard, Users, Dealers, Listings, Complaints, Enquiries, Subscriptions and plans, Payments, Activity log, Reports, Content, and Team. Every figure and action uses the live API.
+
+- **Roles:** Owner (everything), Support (users, dealers, listings, complaints, activity), Content editor (announcements, homepage, featuring cars), Finance (subscriptions, payments, revenue reports). Admins set up before roles existed keep full Owner access; add people under **Team** to give them a role. The API enforces permissions on every route; the console only hides what a role can't use.
+- **Critical actions** (delete a listing, suspend a dealer or user, hide or reject, change plans or team roles) need an explicit confirmation, which the console collects in a dialog. Hide, reject and suspend also need a written reason.
+- **Activity log:** every admin action, listing change by sellers and dealers, registration, dealer application, subscription change and payment is recorded in `auditLog` and is append-only. It starts when this ships; earlier history can't be recovered, so older listings show only their created, published and updated dates.
+- **Moderation:** hiding or rejecting a listing removes it from the main site, the dealer site and image delivery. Rejected listings can't be republished by their owner. Suspending a user or dealer blocks changes and hides their cars; reactivating restores only the cars that suspension hid.
+- **Payments:** Stripe invoices are recorded from webhook events into `payments`. In the Stripe dashboard, add **`invoice.paid`**, **`invoice.payment_failed`** and **`charge.refunded`** to the existing webhook endpoint. To load past invoices, run `node backend/scripts/backfill-payments.js` (preview) then `--apply`.
+- **Plans:** limits, names and whether a plan is offered are editable and apply to checkout and existing subscribers at once. Prices stay in Stripe: create a new monthly GBP price there and paste its ID; it is verified with Stripe before saving.
+- **Complaints:** "Report this listing" appears on car pages on both sites. Reports queue in **Complaints** (one open report per person per car, five per hour).
+- **Announcements:** an optional banner for the main site, the dealer site or both, with scheduling.
+- **Reports:** CSV downloads for users, dealers, listings, subscriptions, payments and activity, filtered like the lists, with formula-injection protection. Each download is itself logged.
+- **Removed:** the old "local admin" mock mode (demo data and a hard-coded login) has been deleted from the frontend.
+
 ## Visibility rules
 
 The backend decides visibility; clients cannot set `visibility`, `sellerType` or `isFeatured`.
