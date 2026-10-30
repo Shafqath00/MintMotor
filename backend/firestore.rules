@@ -1,0 +1,11 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Marketplace, dealer records, private trade data and enquiries are served by
+    // Cloud Functions. Browser clients must never bypass their authorization checks.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

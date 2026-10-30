@@ -11,5 +11,15 @@
         "*.local"
       ]
     }
+  ],
+  "firestore": [
+    {
+      "database": "(default)",
+      "rules": "firestore.rules"
+    },
+    {
+      "database": "mintmotor",
+      "rules": "firestore.rules"
+    }
   ]
 }
