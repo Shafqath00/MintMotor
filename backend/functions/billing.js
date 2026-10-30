@@ -27,12 +27,14 @@ async function validateRecurringPrice({ stripe, priceId, expectedAmount, expecte
   return { id: price.id || priceId };
 }
 
-async function unpublishPublicListingsAfterAccessEnds({ database, userId, timestamp }) {
+async function unpublishPublicListingsAfterAccessEnds({ database, userId, timestamp, onUnpublished = async () => {} }) {
   if (!database || !userId) return 0;
   const snapshot = await database.collection("cars").where("ownerId", "==", userId).get();
   const listings = snapshot.docs.filter((doc) => {
     const car = doc.data();
-    return car.ownerId === userId && car.listingPlan === "public-subscription" && car.status === "published";
+    // Adverts saved before plan choice existed have no listingPlan and were always public.
+    const publicPlan = (car.listingPlan || "public-subscription") === "public-subscription" && car.visibility !== "dealer-network";
+    return car.ownerId === userId && car.sellerType !== "dealer" && publicPlan && car.status === "published";
   });
 
   for (let offset = 0; offset < listings.length; offset += 500) {
@@ -42,6 +44,8 @@ async function unpublishPublicListingsAfterAccessEnds({ database, userId, timest
     }
     await batch.commit();
   }
+  // Keeps the Storage-rules mirror in step so older public photo links close too.
+  for (const listing of listings) await onUnpublished(listing.id, { ...listing.data(), status: "draft" });
 
   return listings.length;
 }

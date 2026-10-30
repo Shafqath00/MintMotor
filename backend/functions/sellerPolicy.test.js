@@ -1,23 +1,23 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { privateSellerPatch, isPublicMarketplaceCar, dealerSubmission, validateSellerIdentity, validatePrivateImageReferences } = require('./sellerPolicy');
+const { sellerPlanPatch, isPublicMarketplaceCar, dealerSubmission, validateSellerIdentity, validatePrivateImageReferences } = require('./sellerPolicy');
 
-test('new private submissions cannot retain client ownership, paid plans or publication status', () => {
-  assert.deepEqual(privateSellerPatch(), { sellerType: 'private', listingPlan: 'dealer-network-free', visibility: 'dealer-network', status: 'draft', isFeatured: false });
-  assert.deepEqual(privateSellerPatch({ status: 'published', listingPlan: 'dealer-network-free' }), { sellerType: 'private', listingPlan: 'dealer-network-free', visibility: 'dealer-network', status: 'published', isFeatured: false });
-  assert.equal(privateSellerPatch({status: 'published', listingPlan:'public-subscription'}).status, 'draft');
+test('seller plan patch derives visibility on the server and never features private adverts', () => {
+  assert.deepEqual(sellerPlanPatch('dealer-network-free'), { sellerType: 'private', listingPlan: 'dealer-network-free', visibility: 'dealer-network', isFeatured: false });
+  assert.deepEqual(sellerPlanPatch('public-subscription'), { sellerType: 'private', listingPlan: 'public-subscription', visibility: 'public', isFeatured: false });
+  assert.deepEqual(sellerPlanPatch('anything-else'), sellerPlanPatch('public-subscription'));
 });
 
-test('public marketplace eligibility enforces grandfather dates and denies private submissions even with forged visibility', () => {
-  const now = Date.parse('2026-10-30T12:00:00Z');
-  const legacy = {sellerType:'private',status:'published',visibility:'public',listingPlan:'public-subscription',legacyPublicUntil:'2026-11-01T00:00:00Z'};
-  assert.equal(isPublicMarketplaceCar(legacy, now), true);
-  assert.equal(isPublicMarketplaceCar({...legacy,legacyPublicUntil:new Date(now).toISOString()}, now), false);
-  assert.equal(isPublicMarketplaceCar({...legacy,legacyPublicUntil:undefined}, now), false);
-  assert.equal(isPublicMarketplaceCar({...legacy,listingPlan:'dealer-network-free'}, now), false);
-  assert.equal(isPublicMarketplaceCar({sellerType:'dealer',status:'active',visibility:'public'}, now), true);
-  assert.equal(isPublicMarketplaceCar({sellerType:'dealer',status:'draft',visibility:'public'}, now), false);
-  assert.equal(isPublicMarketplaceCar({sellerType:'dealer',status:'active',visibility:'dealer-network'}, now), false);
+test('public marketplace eligibility shows paid public adverts and denies dealer-only submissions even with forged visibility', () => {
+  const advert = {sellerType:'private',status:'published',visibility:'public',listingPlan:'public-subscription'};
+  assert.equal(isPublicMarketplaceCar(advert), true);
+  assert.equal(isPublicMarketplaceCar({...advert,status:'sold'}), true);
+  assert.equal(isPublicMarketplaceCar({...advert,status:'draft'}), false);
+  assert.equal(isPublicMarketplaceCar({...advert,listingPlan:'dealer-network-free'}), false);
+  assert.equal(isPublicMarketplaceCar({...advert,visibility:'dealer-network'}), false);
+  assert.equal(isPublicMarketplaceCar({sellerType:'dealer',status:'active',visibility:'public'}), true);
+  assert.equal(isPublicMarketplaceCar({sellerType:'dealer',status:'draft',visibility:'public'}), false);
+  assert.equal(isPublicMarketplaceCar({sellerType:'dealer',status:'active',visibility:'dealer-network'}), false);
 });
 
 test('dealer feed uses a field allowlist and coarse vehicle facts only', () => {

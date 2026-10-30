@@ -84,7 +84,10 @@ async function approveDealer({ applicationId, adminUid }, dependencies) {
   let user;
   try {
     user = await deps.admin.auth().getUserByEmail(application.email);
+    // Accounts are role-locked: never promote a main-site buyer or seller to a dealer.
+    if (user.customClaims?.role !== "dealer") throw Object.assign(new Error("This email belongs to a Mint Motor buyer or seller account. Ask the dealer to apply with a separate business email."), { statusCode: 409, code: "EMAIL_IN_USE_MAIN" });
   } catch (error) {
+    if (error.code === "EMAIL_IN_USE_MAIN") throw error;
     if (error.code !== "auth/user-not-found") throw error;
     user = await deps.admin.auth().createUser({ email: application.email, emailVerified: false });
   }

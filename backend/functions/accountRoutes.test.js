@@ -194,12 +194,12 @@ test("rejectsSellerAndDealerMutationsWhileDeletionPendingButAllowsStatusRead", a
 test("blocks seller and dealer billing mutations while account deletion is pending", () => {
   const source = fs.readFileSync(path.join(__dirname, "index.js"), "utf8");
   for (const route of [
-    'app.post("/billing/customer-portal", requireAuth, requireAccountActive, async',
-    'app.post("/billing/checkout-session", requireAuth, requireAccountActive, async',
+    'app.post("/billing/customer-portal", requireAuth, rejectDealerAccount, requireAccountActive, async',
+    'app.post("/billing/checkout-session", requireAuth, rejectDealerAccount, requireAccountActive, async',
     'app.post("/dealer/billing/customer-portal", requireDealer, requireAccountActive, async',
     'app.post("/dealer/billing/checkout-session", requireDealer, requireAccountActive, async',
     'app.post("/me/verification-sync", requireAuth, requireAccountActive, async',
-    'app.post("/vehicle-checks", requireAuth, requireAccountActive, async',
+    'app.post("/vehicle-checks", requireAuth, rejectDealerAccount, requireAccountActive, async',
     'app.post("/dealer/network/cars/:id/enquiries", requireDealer, requireAccountActive, async',
   ]) {
     assert.ok(source.includes(route), `Expected deletion guard on ${route}`);

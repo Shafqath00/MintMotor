@@ -1,9 +1,11 @@
 const { sanitizeVehicleHistory } = require('./validators');
 
-function privateSellerPatch(current) {
+// The server, never the client, decides who can see a private seller's advert.
+function sellerPlanPatch(listingPlan) {
+  const free = listingPlan === 'dealer-network-free';
   return {
-    sellerType: 'private', listingPlan: 'dealer-network-free', visibility: 'dealer-network',
-    status: current?.listingPlan === 'dealer-network-free' ? current.status : 'draft', isFeatured: false,
+    sellerType: 'private', listingPlan: free ? 'dealer-network-free' : 'public-subscription',
+    visibility: free ? 'dealer-network' : 'public', isFeatured: false,
   };
 }
 
@@ -13,12 +15,11 @@ function dateMillis(value) {
   return value ? new Date(value).getTime() : NaN;
 }
 
-function isPublicMarketplaceCar(car = {}, now = Date.now()) {
+function isPublicMarketplaceCar(car = {}) {
   if (car.visibility === 'dealer-network' || car.listingPlan === 'dealer-network-free') return false;
-  if (!['published', 'active', 'sold'].includes(car.status)) return false;
-  if (car.sellerType === 'dealer' || car.ownerType === 'dealer') return true;
-  if (process.env.SELLER_PLATFORM_SPLIT_ENABLED === 'false') return true;
-  return car.listingPlan === 'public-subscription' && dateMillis(car.legacyPublicUntil) > now;
+  // Dealer stock and paid public adverts alike. The billing webhooks draft them
+  // when the owner's subscription lapses.
+  return ['published', 'active', 'sold'].includes(car.status);
 }
 
 // This projection is deliberately independent of the public marketplace's contact
@@ -52,4 +53,4 @@ function validatePrivateImageReferences(images, ownerId, carId) {
     ? ['Private vehicle photos must be uploaded to this listing.'] : [];
 }
 
-module.exports = {privateSellerPatch, isPublicMarketplaceCar, dealerSubmission, validateSellerIdentity, validatePrivateImageReferences, dateMillis};
+module.exports = {sellerPlanPatch, isPublicMarketplaceCar, dealerSubmission, validateSellerIdentity, validatePrivateImageReferences, dateMillis};

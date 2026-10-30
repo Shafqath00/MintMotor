@@ -1,4 +1,4 @@
-const { isLegacyPublicAdvert } = require('./sellerRetirement');
+const { isPublicMarketplaceCar } = require('./sellerPolicy');
 
 async function protectExistingSellerMedia({ database, storageStatusDatabase, bucket, dryRun, now = Date.now() }) {
   const { prepareSellerListingImages, finalizeSellerListingImages } = require('./sellerMedia');
@@ -11,7 +11,7 @@ async function protectExistingSellerMedia({ database, storageStatusDatabase, buc
     for (const listing of page.docs) {
       const car = listing.data();
       if (car.sellerType !== 'private' || car.ownerType === 'dealer' || car.dealerId) continue;
-      if (isLegacyPublicAdvert(car, now)) { report.deferredPublic.push(listing.id); continue; }
+      if (isPublicMarketplaceCar(car)) { report.deferredPublic.push(listing.id); continue; }
       if (dryRun) { report.protected.push({ id: listing.id, status: 'unverified' }); continue; }
       const progressRef = database.collection('sellerPlanRetirementMedia').doc(listing.id);
       try {
@@ -25,7 +25,7 @@ async function protectExistingSellerMedia({ database, storageStatusDatabase, buc
         }
         const persisted = await database.runTransaction(async transaction => {
           const current = await transaction.get(listing.ref); const value = current.data();
-          if (!current.exists || isLegacyPublicAdvert(value, now) || value.sellerType !== 'private' || value.ownerId !== progress.plan.ownerId) throw new Error('Listing ownership or public entitlement changed; manual review required');
+          if (!current.exists || isPublicMarketplaceCar(value) || value.sellerType !== 'private' || value.ownerId !== progress.plan.ownerId) throw new Error('Listing ownership or public entitlement changed; manual review required');
           const actual = JSON.stringify(value.images || []);
           if (actual !== JSON.stringify(progress.inputImages) && actual !== JSON.stringify(progress.plan.images)) throw new Error('Listing photos changed during migration; manual review required');
           transaction.update(listing.ref, { images: progress.plan.images, updatedAt: new Date(now) });

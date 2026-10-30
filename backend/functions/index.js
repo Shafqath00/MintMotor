@@ -47,15 +47,14 @@ const { DEFAULT_OWNER_ID: SCS_OWNER_ID, syncScsStock } = require("./scsImporter"
 const { updateScsStockStatus } = require("./scsStockAdmin");
 const { DEALER_TIERS, publicDealerTiers } = require("./dealerTiers");
 const { LEGAL_POLICY_VERSION, buildSubscriptionAcceptance, validateSubscriptionAcknowledgement } = require("./legal");
-const { buildSellerCheckoutUrls, createCustomerPortalSession, prepareSellerListingPlanUpdate, unpublishPublicListingsAfterAccessEnds, validateRecurringPrice } = require("./billing");
+const { buildSellerCheckoutUrls, createCustomerPortalSession, unpublishPublicListingsAfterAccessEnds, validateRecurringPrice } = require("./billing");
 const { applyDealerSubscriptionLifecycle, cancelDeletedAccountSubscription, processDueAccountDeletions } = require("./accountLifecycle");
 const { createAccountRoutes, createRequireAccountActive } = require("./accountRoutes");
-const { privateSellerPatch, isPublicMarketplaceCar, dealerSubmission, validateSellerIdentity, validatePrivateImageReferences, dateMillis } = require("./sellerPolicy");
-const { isLegacyPublicAdvert, expireLegacySellerAdverts } = require("./sellerRetirement");
+const { sellerPlanPatch, isPublicMarketplaceCar, dealerSubmission, validateSellerIdentity, validatePrivateImageReferences, dateMillis } = require("./sellerPolicy");
 const { protectExistingSellerMedia } = require("./sellerRetirementMedia");
+const { normalizeRegistration, validateBulkRows, validateLookupRequest, lookupRegistrations } = require("./dealerBulk");
 const { createSellerMediaRouter, prepareSellerListingImages, finalizeSellerListingImages, scrubPrivateImageTokens } = require("./sellerMedia");
 
-const sellerSplitEnabled = () => process.env.SELLER_PLATFORM_SPLIT_ENABLED !== "false";
 const dealershipUrl = () => (process.env.DEALER_FRONTEND_URL || "https://dealer.mintmotor.co.uk").replace(/\/$/, "");
 
 const app = express();
@@ -200,6 +199,15 @@ async function requireAuth(req, res, next) {
     logger.warn("Auth verification failed", error);
     res.status(401).json({ error: "Invalid authentication token." });
   }
+}
+
+// Main-site and dealer accounts are role-locked: a dealer account cannot buy or sell as a private user.
+function rejectDealerAccount(req, res, next) {
+  if (req.user?.role === USER_ROLES.DEALER) {
+    res.status(403).json({ code: "DEALER_ACCOUNT", error: "This is a dealer account. Use the Mint Motor Dealer Portal." });
+    return;
+  }
+  next();
 }
 
 async function requireAdmin(req, res, next) {
@@ -451,7 +459,6 @@ function serializeSubscription(profile = {}) {
     currentPeriodEnd,
     stripeCustomerId: profile.stripeCustomerId || "",
     cancelAtPeriodEnd: profile.subscriptionCancelAtPeriodEnd === true,
-    retired: sellerSplitEnabled(),
   };
 }
 
@@ -540,30 +547,6 @@ async function updateSubscriptionFromStripe(subscription, userIdFromMetadata = "
     return;
   }
 
-  if (sellerSplitEnabled()) {
-    // Retired subscriptions remain auditable, but cannot mint new public access.
-    // The migration alone writes immutable per-advert legacyPublicUntil grants.
-    const profile = await getUserProfile(uid);
-    const knownSubscription = profile.stripeSubscriptionId;
-    const lateSubscription = knownSubscription && knownSubscription !== subscription.id;
-    const periodEnd = subscription.items?.data?.[0]?.current_period_end || subscription.current_period_end;
-    const alreadyCancelled = ["canceled", "incomplete_expired"].includes(subscription.status);
-    if (!alreadyCancelled && !subscription.cancel_at_period_end && stripe?.subscriptions?.update) {
-      await stripe.subscriptions.update(subscription.id, { cancel_at_period_end: true }, { idempotencyKey: `seller-retirement-${subscription.id}` });
-    }
-    if (!lateSubscription) {
-      await database.collection("users").doc(uid).set({
-        stripeCustomerId: customerId || profile.stripeCustomerId || "",
-        stripeSubscriptionId: subscription.id,
-        subscriptionStatus: subscription.status,
-        subscriptionCancelAtPeriodEnd: !alreadyCancelled,
-        subscriptionCurrentPeriodEnd: periodEnd ? Timestamp.fromMillis(periodEnd * 1000) : null,
-        updatedAt: FieldValue.serverTimestamp(),
-      }, { merge: true });
-    }
-    return;
-  }
-
   const item = subscription.items?.data?.[0];
   const periodEndSeconds = item?.current_period_end || subscription.current_period_end;
   await database.collection("users").doc(uid).set({
@@ -580,7 +563,7 @@ async function updateSubscriptionFromStripe(subscription, userIdFromMetadata = "
     subscriptionStatus: subscription.status,
     subscriptionCurrentPeriodEnd: periodEndSeconds ? Timestamp.fromMillis(periodEndSeconds * 1000) : null,
   })) {
-    await unpublishPublicListingsAfterAccessEnds({ database, userId: uid, timestamp: FieldValue.serverTimestamp() });
+    await unpublishPublicListingsAfterAccessEnds({ database, userId: uid, timestamp: FieldValue.serverTimestamp(), onUnpublished: syncSellerStorageStatus });
   }
 }
 
@@ -690,7 +673,7 @@ app.post("/vehicle-lookup", requireAuth, async (req, res) => {
 });
 
 
-app.post("/vehicle-checks", requireAuth, requireAccountActive, async (req, res) => {
+app.post("/vehicle-checks", requireAuth, rejectDealerAccount, requireAccountActive, async (req, res) => {
   try {
     const registrationNumber = String(req.body.registrationNumber || "");
     if (!registrationNumber.trim()) {
@@ -710,7 +693,7 @@ app.post("/vehicle-checks", requireAuth, requireAccountActive, async (req, res) 
   }
 });
 
-app.get("/vehicle-checks", requireAuth, async (req, res) => {
+app.get("/vehicle-checks", requireAuth, rejectDealerAccount, async (req, res) => {
   try {
     const reports = await vehicleCheckStore.list(req.user.uid);
     res.json({ reports });
@@ -720,7 +703,7 @@ app.get("/vehicle-checks", requireAuth, async (req, res) => {
   }
 });
 
-app.get("/vehicle-checks/:reportId", requireAuth, async (req, res) => {
+app.get("/vehicle-checks/:reportId", requireAuth, rejectDealerAccount, async (req, res) => {
   try {
     const report = await vehicleCheckStore.get(req.user.uid, req.params.reportId);
     if (!report) {
@@ -733,7 +716,7 @@ app.get("/vehicle-checks/:reportId", requireAuth, async (req, res) => {
     res.status(500).json({ error: "Unable to load vehicle check report." });
   }
 });
-app.get("/me/subscription", requireAuth, async (req, res) => {
+app.get("/me/subscription", requireAuth, rejectDealerAccount, async (req, res) => {
   try {
     const profile = await getUserProfile(req.user.uid);
     res.json({ subscription: serializeSubscription(profile) });
@@ -743,8 +726,7 @@ app.get("/me/subscription", requireAuth, async (req, res) => {
   }
 });
 
-app.post("/billing/customer-portal", requireAuth, requireAccountActive, async (req, res) => {
-  if (sellerSplitEnabled()) return res.status(410).json({ code: "SELLER_BILLING_RETIRED", error: "Individual seller listings are now free. View previous billing information in your dealership seller workspace." });
+app.post("/billing/customer-portal", requireAuth, rejectDealerAccount, requireAccountActive, async (req, res) => {
   try {
     const stripe = getStripeClient();
     if (!stripe) return res.status(503).json({ error: "Stripe billing is not configured." });
@@ -770,8 +752,7 @@ app.post("/me/verification-sync", requireAuth, requireAccountActive, async (req,
   }
 });
 
-app.post("/billing/checkout-session", requireAuth, requireAccountActive, async (req, res) => {
-  if (sellerSplitEnabled()) return res.status(410).json({ code: "SELLER_BILLING_RETIRED", error: "Individual seller listings are now free and available only to approved dealers." });
+app.post("/billing/checkout-session", requireAuth, rejectDealerAccount, requireAccountActive, async (req, res) => {
   try {
     const draftId = String(req.body?.draftId || "").trim();
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(draftId)) return res.status(400).json({ error: "A valid draft listing is required." });
@@ -827,10 +808,21 @@ app.post("/billing/checkout-session", requireAuth, requireAccountActive, async (
   }
 });
 
+async function isMainSiteAccountEmail(email) {
+  try {
+    const user = await admin.auth().getUserByEmail(email);
+    return user.customClaims?.role !== USER_ROLES.DEALER;
+  } catch (error) {
+    if (error.code === "auth/user-not-found") return false;
+    throw error;
+  }
+}
+
 app.post("/dealer-applications", async (req, res) => {
   try {
     const { application, errors } = validateDealerApplication(req.body);
     if (errors.length) return res.status(400).json({ errors });
+    if (await isMainSiteAccountEmail(application.email)) return res.status(409).json({ code: "EMAIL_IN_USE_MAIN", error: "This email already has a Mint Motor buyer or seller account. Apply with a separate business email." });
     const lockRef = database.collection("dealerApplicationLocks").doc(normalizedEmailHash(application.email));
     const applicationRef = database.collection("dealerApplications").doc();
     await database.runTransaction(async (transaction) => {
@@ -1121,7 +1113,7 @@ app.get("/cars/:id", optionalAuth, async (req, res) => {
   }
 });
 
-app.post("/cars", requireAuth, requireAccountActive, async (req, res) => {
+app.post("/cars", requireAuth, rejectDealerAccount, requireAccountActive, async (req, res) => {
   try {
     await ensureUserProfile(req.user, req.body.seller || {});
     const { listing, errors } = validateListingPayload(req.body, { partial: true });
@@ -1140,18 +1132,11 @@ app.post("/cars", requireAuth, requireAccountActive, async (req, res) => {
     }
 
     const now = FieldValue.serverTimestamp();
-    const listingPlan = sellerSplitEnabled() || listing.listingPlan === "dealer-network-free"
-      ? "dealer-network-free"
-      : "public-subscription";
     const docRef = database.collection("cars").doc();
-    if (sellerSplitEnabled()) {
-      const imageErrors = validatePrivateImageReferences(listing.images, req.user.uid, docRef.id);
-      if (imageErrors.length) return res.status(400).json({ errors: imageErrors });
-    }
+    const imageErrors = validatePrivateImageReferences(listing.images, req.user.uid, docRef.id);
+    if (imageErrors.length) return res.status(400).json({ errors: imageErrors });
     await docRef.set({
       ...listing,
-      listingPlan,
-      visibility: listingPlan === "dealer-network-free" ? "dealer-network" : "public",
       vehicleHistoryVerified: false,
       ...locationPatch,
       ownerId: req.user.uid,
@@ -1160,7 +1145,7 @@ app.post("/cars", requireAuth, requireAccountActive, async (req, res) => {
       status: LISTING_STATUS.DRAFT,
       createdAt: now,
       updatedAt: now,
-      ...(sellerSplitEnabled() ? privateSellerPatch() : {}),
+      ...sellerPlanPatch(listing.listingPlan),
     });
 
     const snapshot = await docRef.get();
@@ -1172,7 +1157,7 @@ app.post("/cars", requireAuth, requireAccountActive, async (req, res) => {
   }
 });
 
-app.patch("/cars/:id", requireAuth, requireAccountActive, async (req, res) => {
+app.patch("/cars/:id", requireAuth, rejectDealerAccount, requireAccountActive, async (req, res) => {
   try {
     const docRef = database.collection("cars").doc(req.params.id);
     const snapshot = await docRef.get();
@@ -1196,30 +1181,24 @@ app.patch("/cars/:id", requireAuth, requireAccountActive, async (req, res) => {
 
     if (isDealerOwnedCar(current)) return res.status(403).json({ error: "Manage Dealer Network vehicles from your dealer inventory." });
     if (req.body.status !== undefined) return res.status(400).json({ error: "Use the publish or status action to change listing status." });
-    if (sellerSplitEnabled() && req.body.listingPlan === "public-subscription" && current.listingPlan !== "public-subscription") return res.status(400).json({ error: "Individual seller listings can only be shared with approved dealers." });
-    let planPatch = req.body.listingPlan === undefined ? {} : prepareSellerListingPlanUpdate({
-      listingPlan: listing.listingPlan,
-      hasSubscription: listing.listingPlan === "public-subscription" && hasActiveSubscription(await getUserProfile(req.user.uid)),
-    });
-    if (sellerSplitEnabled()) {
-      if (req.body.listingPlan === "public-subscription" && !isLegacyPublicAdvert(current)) return res.status(400).json({ error: "Paid public adverts have been retired. Submit to dealers for free." });
-      // A plan change requires the owner's explicit confirmation in the free submit flow.
-      planPatch = req.body.listingPlan === "dealer-network-free" ? privateSellerPatch(current) : {};
-      if (current.listingPlan === "dealer-network-free" || planPatch.listingPlan === "dealer-network-free") {
-        if (req.body.images !== undefined) {
-          const imageErrors = validatePrivateImageReferences(listing.images, req.user.uid, req.params.id);
-          if (imageErrors.length) return res.status(400).json({ errors: imageErrors });
-          await scrubPrivateImageTokens({ bucket: storage.bucket(), images: listing.images, ownerId: req.user.uid, carId: req.params.id });
-        }
-      }
-      if (planPatch.listingPlan === "dealer-network-free" && current.listingPlan !== "dealer-network-free") {
-        // Close legacy public access before revoking its old media references.
-        await syncSellerStorageStatus(req.params.id, { ...current, ...planPatch });
-        const images = await protectPrivateSellerImages(req.params.id, current);
-        listing.images = req.body.images === undefined ? images : listing.images;
-      }
-      delete listing.isFeatured;
+    const planPatch = req.body.listingPlan === undefined ? {} : sellerPlanPatch(listing.listingPlan);
+    const planChanged = planPatch.listingPlan !== undefined && planPatch.listingPlan !== current.listingPlan;
+    if (planChanged && current.status !== LISTING_STATUS.DRAFT) return res.status(409).json({ error: "Withdraw this listing to a draft before changing how it is advertised." });
+    const nextPlan = planPatch.listingPlan || current.listingPlan;
+    if (req.body.images !== undefined) {
+      // Older paid adverts may still reference their original public photos; only new photos must be private uploads.
+      const keptLegacy = nextPlan === "public-subscription" ? new Set(current.images || []) : new Set();
+      const imageErrors = validatePrivateImageReferences(listing.images.filter((image) => !keptLegacy.has(image)), req.user.uid, req.params.id);
+      if (imageErrors.length) return res.status(400).json({ errors: imageErrors });
+      await scrubPrivateImageTokens({ bucket: storage.bucket(), images: listing.images.filter((image) => !keptLegacy.has(image)), ownerId: req.user.uid, carId: req.params.id });
     }
+    if (planChanged && nextPlan === "dealer-network-free") {
+      // Close public access before revoking any older public photo links.
+      await syncSellerStorageStatus(req.params.id, { ...current, ...planPatch });
+      const images = await protectPrivateSellerImages(req.params.id, current);
+      listing.images = req.body.images === undefined ? images : listing.images;
+    }
+    delete listing.isFeatured;
     const historyUpdate = prepareVehicleHistoryUpdate({
       current,
       payload: req.body,
@@ -1250,7 +1229,7 @@ app.patch("/cars/:id", requireAuth, requireAccountActive, async (req, res) => {
   }
 });
 
-app.patch("/cars/:id/status", requireAuth, requireAccountActive, async (req, res) => {
+app.patch("/cars/:id/status", requireAuth, rejectDealerAccount, requireAccountActive, async (req, res) => {
   try {
     const docRef = database.collection("cars").doc(req.params.id);
     const snapshot = await docRef.get();
@@ -1275,7 +1254,6 @@ app.patch("/cars/:id/status", requireAuth, requireAccountActive, async (req, res
     }
     await syncSellerStorageStatus(req.params.id, { ...current, status });
     await docRef.set({ status, updatedAt: FieldValue.serverTimestamp() }, { merge: true });
-    if (sellerSplitEnabled() && current.listingPlan === "public-subscription") await protectPrivateSellerImages(req.params.id, { ...current, status });
     res.json({ car: serializeCar(await docRef.get()) });
   } catch (error) {
     logger.error("Failed to update listing status", error);
@@ -1283,7 +1261,7 @@ app.patch("/cars/:id/status", requireAuth, requireAccountActive, async (req, res
   }
 });
 
-app.post("/cars/:id/publish", requireAuth, requireAccountActive, async (req, res) => {
+app.post("/cars/:id/publish", requireAuth, rejectDealerAccount, requireAccountActive, async (req, res) => {
   try {
     const docRef = database.collection("cars").doc(req.params.id);
     const snapshot = await docRef.get();
@@ -1300,12 +1278,11 @@ app.post("/cars/:id/publish", requireAuth, requireAccountActive, async (req, res
     }
     if (isDealerOwnedCar(car)) return res.status(403).json({ error: "Publish Dealer Network vehicles from your dealer inventory." });
 
-    if (sellerSplitEnabled() && car.listingPlan !== "dealer-network-free") return res.status(409).json({ error: "Confirm the free dealer-only submission before publishing this vehicle." });
     const errors = validatePublishListing(car);
-    if (sellerSplitEnabled()) {
+    if (car.listingPlan === "dealer-network-free") {
       errors.push(...validateSellerIdentity(req.user));
       errors.push(...validatePrivateImageReferences(car.images, car.ownerId, req.params.id));
-    } else if (car.listingPlan !== "dealer-network-free") {
+    } else {
       const profileSnapshot = await database.collection("users").doc(req.user.uid).get();
       errors.push(...validateSellerPublishRequirements({
         authUser: req.user,
@@ -1352,7 +1329,7 @@ app.post("/cars/:id/publish", requireAuth, requireAccountActive, async (req, res
   }
 });
 
-app.delete("/cars/:id", requireAuth, requireAccountActive, async (req, res) => {
+app.delete("/cars/:id", requireAuth, rejectDealerAccount, requireAccountActive, async (req, res) => {
   try {
     const docRef = database.collection("cars").doc(req.params.id);
     const snapshot = await docRef.get();
@@ -1437,6 +1414,54 @@ app.post("/dealer/cars", requireDealer, requireAccountActive, async (req, res) =
   } catch (error) {
     logger.error("Failed to create dealer listing", error);
     res.status(500).json({ error: "Unable to create dealer listing." });
+  }
+});
+
+app.post("/dealer/cars/bulk", requireDealer, requireAccountActive, async (req, res) => {
+  try {
+    const inventory = await database.collection("cars").where("dealerId", "==", req.dealer.id).get();
+    const existingRegistrations = new Set(inventory.docs.map((doc) => normalizeRegistration(doc.data().registrationNumber)).filter(Boolean));
+    const { error, results } = validateBulkRows(req.body?.rows, { validateListingPayload, validateDealerPrivatePayload, existingRegistrations });
+    if (error) return res.status(400).json({ error });
+    const valid = results.filter((result) => result.listing);
+    const batch = database.batch();
+    for (const result of valid) {
+      const ref = database.collection("cars").doc();
+      result.id = ref.id;
+      batch.set(ref, {
+        ...result.listing,
+        isFeatured: false,
+        ownerId: req.dealer.id,
+        ownerEmail: req.dealer.email,
+        ownerType: "dealer",
+        dealerId: req.dealer.id,
+        sellerType: "dealer",
+        visibility: "public",
+        status: LISTING_STATUS.DRAFT,
+        createdAt: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+      batch.set(dealerPrivateRef(ref.id), { carId: ref.id, dealerId: req.dealer.id, ...result.privateData, createdAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp() });
+    }
+    if (valid.length) await batch.commit();
+    res.status(valid.length ? 201 : 400).json({
+      created: valid.length,
+      results: results.map((result) => result.id ? { row: result.row, id: result.id } : { row: result.row, errors: result.errors }),
+    });
+  } catch (error) {
+    logger.error("Failed to bulk create dealer listings", error);
+    res.status(500).json({ error: "Unable to add these vehicles." });
+  }
+});
+
+app.post("/dealer/cars/lookup", requireDealer, requireAccountActive, async (req, res) => {
+  const error = validateLookupRequest(req.body?.vehicles);
+  if (error) return res.status(400).json({ error });
+  try {
+    res.json({ results: await lookupRegistrations(req.body.vehicles, { lookupVehicle, safeVehicleLookup }) });
+  } catch (lookupError) {
+    logger.error("Dealer registration lookup failed", lookupError);
+    res.status(500).json({ error: "Unable to look up these vehicles." });
   }
 });
 
@@ -1698,7 +1723,7 @@ app.post("/cars/:id/enquiries", async (req, res) => {
   }
 });
 
-app.get("/me/listings", requireAuth, async (req, res) => {
+app.get("/me/listings", requireAuth, rejectDealerAccount, async (req, res) => {
   try {
     const snapshot = await database.collection("cars")
       .where("ownerId", "==", req.user.uid)
@@ -1714,7 +1739,7 @@ app.get("/me/listings", requireAuth, async (req, res) => {
   }
 });
 
-app.get("/me/dealer-enquiries", requireAuth, async (req, res) => {
+app.get("/me/dealer-enquiries", requireAuth, rejectDealerAccount, async (req, res) => {
   try {
     const snapshot = await database.collection("dealerEnquiries").where("sellerOwnerId", "==", req.user.uid).get();
     const enquiries = await Promise.all(snapshot.docs.map(async (doc) => {
@@ -1728,7 +1753,7 @@ app.get("/me/dealer-enquiries", requireAuth, async (req, res) => {
   } catch (error) { logger.error("Failed to load seller dealer enquiries", error); res.status(500).json({ error: "Unable to load dealer enquiries." }); }
 });
 
-app.get("/me/enquiries", requireAuth, async (req, res) => {
+app.get("/me/enquiries", requireAuth, rejectDealerAccount, async (req, res) => {
   try {
     const snapshot = await database.collection("enquiries")
       .where("sellerId", "==", req.user.uid)
@@ -2019,10 +2044,8 @@ app.use((req, res) => {
 exports.mintapi = onRequest({ region: "us-central1", timeoutSeconds: 540, memory: "1GiB", secrets: [stripeSecretKey, stripeWebhookSecret] }, app);
 exports.app = app;
 exports.sellerRetirementReconciliation = onSchedule({ schedule: "every 60 minutes", timeZone: "Etc/UTC", region: "us-central1", timeoutSeconds: 540, memory: "1GiB" }, async () => {
-  if (!sellerSplitEnabled()) return;
-  const now = Date.now();
-  await expireLegacySellerAdverts({ database, now, timestamp: FieldValue.serverTimestamp() });
-  const result = await protectExistingSellerMedia({ database, storageStatusDatabase, bucket: storage.bucket(), dryRun: false, now });
+  // Moves photos of every non-public private advert (dealer-only or withdrawn) to private storage and revokes old links.
+  const result = await protectExistingSellerMedia({ database, storageStatusDatabase, bucket: storage.bucket(), dryRun: false });
   if (result.errors.length) throw new Error(`${result.errors.length} private seller photo migrations need a retry.`);
 });
 exports.accountDeletionReconciliation = onSchedule({

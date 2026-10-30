@@ -32,7 +32,7 @@ function fakeDatabase(initial = {}) {
   };
 }
 
-function setup({ mailFails = false, existingClaims = { existing: true } } = {}) {
+function setup({ mailFails = false, existingClaims = { existing: true, role: "dealer" } } = {}) {
   const database = fakeDatabase({ dealerApplications: { "app-1": {
     businessName: "Mint Cars", contactName: "Ava Smith", email: "ava@mint.test", phone: "07700",
     postcode: "SW1A 1AA", address: "1 Dealer Way", companyNumber: "", vatNumber: "", website: "",
@@ -69,6 +69,13 @@ test("approval preserves existing claims and creates linked approved records", a
   assert.equal(state.storageStatusDatabase.data.get("storageDealerStatus").get("dealer-1").dealerStatus, DEALER_STATUS.APPROVED);
   assert.equal(state.mail.length, 1);
   assert.match(state.mail[0].setupLink, /dealer@|ava@mint\.test/);
+});
+
+test("approval refuses to promote a main-site buyer or seller account", async () => {
+  const state = setup({ existingClaims: { existing: true } });
+  await assert.rejects(approveDealer({ applicationId: "app-1", adminUid: "admin-1" }, state.dependencies), (error) => error.statusCode === 409 && error.code === "EMAIL_IN_USE_MAIN");
+  assert.deepEqual(state.users.get("dealer-1").customClaims, { existing: true });
+  assert.equal(state.mail.length, 0);
 });
 
 test("new Auth users are created without a staff-chosen password", async () => {

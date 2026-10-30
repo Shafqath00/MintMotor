@@ -37,6 +37,7 @@ test("ends public visibility only for published public-subscription listings", a
   const cars = new Map([
     ["public-live", { ownerId: "seller-1", listingPlan: "public-subscription", status: "published" }],
     ["public-draft", { ownerId: "seller-1", listingPlan: "public-subscription", status: "draft" }],
+    ["pre-plan-live", { ownerId: "seller-1", status: "published" }],
     ["dealer-live", { ownerId: "seller-1", listingPlan: "dealer-network-free", status: "published" }],
     ["other-seller", { ownerId: "seller-2", listingPlan: "public-subscription", status: "published" }],
   ]);
@@ -52,13 +53,16 @@ test("ends public visibility only for published public-subscription listings", a
     }),
   };
 
-  await unpublishPublicListingsAfterAccessEnds({ database, userId: "seller-1", timestamp: "server-time" });
+  const mirrored = [];
+  await unpublishPublicListingsAfterAccessEnds({ database, userId: "seller-1", timestamp: "server-time", onUnpublished: async (id, car) => mirrored.push([id, car.status]) });
 
   assert.equal(cars.get("public-live").status, "draft");
   assert.equal(cars.get("public-live").updatedAt, "server-time");
   assert.equal(cars.get("public-draft").status, "draft");
   assert.equal(cars.get("dealer-live").status, "published");
   assert.equal(cars.get("other-seller").status, "published");
+  assert.equal(cars.get("pre-plan-live").status, "draft");
+  assert.deepEqual(mirrored, [["public-live", "draft"], ["pre-plan-live", "draft"]]);
 });
 
 test("ends dealer visibility only for active dealer-owned stock", async () => {

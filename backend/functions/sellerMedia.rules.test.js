@@ -66,11 +66,11 @@ test("Storage rules enforce owned uploads, private byte access, recovery listing
   assert.equal((await upload(privatePath, "seller")).status, 403, "inactive account cannot upload");
   const publicPath = "users/seller/cars/public-car/photo.jpg";
   assert.equal((await upload(publicPath, "owner")).status, 200);
-  const publicListing = { ...listing, status: "published", listingPlan: "public-subscription", visibility: "public", legacyPublicUntil: new Date(Date.now() + 60000) };
+  const publicListing = { ...listing, status: "published", listingPlan: "public-subscription", visibility: "public" };
   await seed("public-car", publicListing);
-  assert.equal((await get(publicPath)).status, 200, "grandfather public image remains available");
-  await seed("public-car", { ...publicListing, legacyPublicUntil: new Date(Date.now() - 60000) });
-  assert.equal((await get(publicPath)).status, 403, "grandfather image expires in Storage too");
+  assert.equal((await get(publicPath)).status, 200, "published paid advert image is public");
+  await seed("public-car", { ...publicListing, status: "draft" });
+  assert.equal((await get(publicPath)).status, 403, "withdrawn or lapsed advert image is not public");
   await seed("public-car", { ...listing, status: "published" });
   assert.equal((await get(publicPath)).status, 403, "dealer-only legacy image is not public");
 });

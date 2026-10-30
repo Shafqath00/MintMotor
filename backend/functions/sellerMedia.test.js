@@ -166,12 +166,12 @@ test("migration rejects external/foreign/token URLs before copying any image", a
   }
 });
 
-test("legacy paid-through public images remain viewable anonymously only before expiry", async () => {
-  const legacy = { listingPlan: "public-subscription", visibility: "public", legacyPublicUntil: new Date(Date.now() + 60_000) };
+test("paid public advert images are viewable anonymously only while the advert is published", async () => {
+  const legacy = { listingPlan: "public-subscription", visibility: "public" };
   const valid = fixture({ car: legacy });
   assert.equal((await request(valid.app).get("/cars/car-1/images/0")).status, 200);
   assert.equal((await request(valid.app).get("/cars/car-1/images/0").set("Authorization", "Bearer other")).status, 200);
-  for (const patch of [{ legacyPublicUntil: new Date(Date.now() - 1000) }, { status: "draft" }, { visibility: "dealer-network" }, { listingPlan: "dealer-network-free" }]) {
+  for (const patch of [{ status: "draft" }, { visibility: "dealer-network" }, { listingPlan: "dealer-network-free" }]) {
     assert.equal((await request(fixture({ car: { ...legacy, ...patch } }).app).get("/cars/car-1/images/0")).status, 401);
   }
 });
